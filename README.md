@@ -46,8 +46,8 @@ The filter does nothing until audio routes through it.
 ## Usage
 
 Click the sliders icon in the bar. The panel gives you ten bands, a `pre`
-(preamp) slider, and buttons for the four most-used presets. The rest are
-available from the CLI.
+(preamp) slider, a Surround toggle, and five preset buttons. The remaining
+presets are available from the CLI.
 
 - **Drag** a slider to change a band; it applies as you move.
 - **Right-click** a slider to zero that band. Right-click `pre` to return it to
@@ -80,8 +80,8 @@ omarchy-eq on | off
 | `bass-up` | more weight |
 | `vocal` | speech and podcasts — rumble and plosives cut, 250 Hz boxiness removed, presence lifted at 1–4k, top eased back so sibilance is not exaggerated |
 | `loudness` | quiet listening (smile curve) |
-| `custom` | whatever you last dialled in by hand — see below |
 | `gaming` | games and films — low-mids pulled back so effects don't mask speech, presence lift at 2–4k for dialogue and positional cues |
+| `custom` | whatever you last dialled in by hand; editing any band writes into it |
 
 ## How it works
 
@@ -136,12 +136,6 @@ and `~/.config/systemd/user`.
 
 `install.sh` notices when it is running from inside the plugins directory (the
 `omarchy plugin add` case) and then installs only the DSP half.
-
-## Renaming the plugin id
-
-Third-party ids are `<vendor>.<name>`. To publish under your own handle, change
-`id` in `manifest.json` — the installers read it from there, so that is the only
-edit.
 
 ## Uninstall
 
