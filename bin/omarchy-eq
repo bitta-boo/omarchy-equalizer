@@ -1,0 +1,349 @@
+#!/bin/bash
+# 10-band graphic equalizer for PipeWire, hosted the way Omarchy hosts its own
+# speaker tuning: a filter-chain in its own PipeWire client, under its own
+# config name, driven by a systemd user service.
+#
+# State lives in ~/.config/omarchy/eq.json so the shell plugin and this CLI
+# share one source of truth. Gains are dB, -12..+12.
+#
+# Uses PipeWire's *builtin* bq_peaking biquads - no LV2 plugins, nothing outside
+# the official repos, and nothing with a GUI to theme.
+set -uo pipefail
+
+STATE="$HOME/.config/omarchy/eq.json"
+FRAGMENT="$HOME/.config/pipewire/omarchy-eq.conf.d/90-eq.conf"
+UNIT=omarchy-eq.service
+SINK_DESC="Equalizer"
+
+# ISO octave centres. Q=1.41 is the standard for a 10-band octave graphic EQ:
+# adjacent bands overlap at about -3 dB, so a flat setting stays flat.
+BANDS=(31 62 125 250 500 1000 2000 4000 8000 16000)
+Q=1.41
+# Stereo width for the surround toggle. mid+side reconstructs the original
+# channel exactly at 1.0, so "off" is a true passthrough and switching is a
+# live gain change rather than a graph rebuild.
+WIDTH_ON=1.6
+
+usage() {
+  cat <<EOF
+usage: omarchy-eq <command>
+
+  status                 show current gains and whether the EQ is running
+  get                    print gains as JSON (used by the shell plugin)
+  set <band> <dB>        set one band by index (0-9) or centre frequency
+  preamp <dB>            manual level offset on top of the automatic headroom
+  preset <name>          flat | treble | bass-up | vocal | loudness | gaming | custom
+                         custom recalls whatever you last dialled in by hand
+  on | off               enable/disable the equalizer sink
+  surround on|off        stereo widening (mid/side), applied live
+  apply                  regenerate the graph and restart the service
+
+examples:
+  omarchy-eq set 31 -6         # drop the 31 Hz band by 6 dB
+  omarchy-eq set 0 -6          # same band, by index
+  omarchy-eq preset treble     # lows back, progressive lift from 2k up
+EOF
+}
+
+# The preset table lives here so `get` can name the active preset and `preset`
+# can apply one, without the two drifting apart.
+presets_py() { cat <<'PY'
+P={"flat":[0]*10,
+   "bass-up":[5,4,3,1,0,0,0,0,1,2],
+   # Treble. The conventional shape most equalizers ship under this name: the
+   # low end pulled back, flat through the mids, and a progressive lift from 2k
+   # up. Classic Winamp-style presets push this to +15 and beyond; that would
+   # cost 15 dB of headroom here, so it is scaled to peak at +6.
+   "treble":[-4,-4,-3,-2,0,1,3,5,6,6],
+   # Gaming / movies. A cinema-style curve: a little low-end weight for impact,
+   # the low-mids pulled back so explosions do not mask speech, a presence lift
+   # through 2-4k where dialogue intelligibility and positional cues (footsteps,
+   # direction) live, and air on top. Peaks at +4 so it costs the same 4 dB of
+   # headroom as bass-down.
+   "gaming":[2,1,-1,-2,-1,1,3,4,3,2],
+   # Speech / podcasts. Rumble and plosives cut below ~125, the 250 Hz
+   # boxiness pulled out, presence lifted through 1-4k where consonants and
+   # intelligibility live, and the top eased back so sibilance is not
+   # exaggerated. Peaks at +4, matching the other presets' headroom cost.
+   "vocal":[-6,-4,-2,-3,-1,2,4,3,0,-1],
+   "loudness":[4,3,1,0,-1,0,1,2,3,4]}
+PY
+}
+
+ensure_state() {
+  [[ -f $STATE ]] && return
+  mkdir -p "$(dirname "$STATE")"
+  printf '{"enabled":true,"surround":false,"preamp":0,"active":"flat","gains":[0,0,0,0,0,0,0,0,0,0],"custom":[0,0,0,0,0,0,0,0,0,0]}\n' >"$STATE"
+}
+
+# Argument goes through argv, never through the -c source: a key containing a
+# quote would otherwise escape the Python string literal and be executed.
+json_get() {
+  python3 - "$STATE" "$1" 2>/dev/null <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+print(json.dumps(d) if sys.argv[2]=='all' else d[sys.argv[2]])
+PY
+}
+
+# Build the filter graph. Each channel gets its own chain because a mono graph
+# would be duplicated per channel by the adapter, which is fine for EQ but makes
+# the node names ambiguous when setting controls at runtime.
+generate() {
+  # One validated pass over the state file. Every number the graph needs is
+  # produced here or not at all: a non-numeric gain used to raise ValueError in
+  # one step, leave the next interpolation empty, and write a config PipeWire
+  # silently refused to load - while `apply` still printed "applied" and exited
+  # 0, so the sink only vanished at the next reboot. Now it is a hard error and
+  # the existing config is left untouched.
+  local vals gains mult width
+  vals=$(python3 - "$STATE" "$WIDTH_ON" <<'PY'
+import json,sys
+path, width_on = sys.argv[1], float(sys.argv[2])
+d = json.load(open(path))
+g = d.get('gains')
+if not isinstance(g, list) or len(g) != 10:
+    sys.exit("omarchy-eq: 'gains' must be a list of 10 numbers in %s" % path)
+try:
+    gains = [float(x) for x in g]
+    preamp = float(d.get('preamp', 0))
+except (TypeError, ValueError) as e:
+    sys.exit("omarchy-eq: non-numeric value in %s: %s" % (path, e))
+# Auto headroom: pull the chain down by the largest boost so a peak cannot clip.
+# `preamp` in the state file is an extra manual offset on top of that.
+#
+# Surround is deliberately NOT charged headroom. The widener only amplifies the
+# *difference* between the channels: centred content passes at exactly unity and
+# typical stereo gains under 1 dB. Only fully anti-phase material approaches the
+# width factor, which real recordings do not do at full scale. Charging that
+# worst case cost 4.1 dB on everything and was audible as a volume drop.
+head = round(-max([0.0] + gains) + preamp, 2)
+print(' '.join('%g' % x for x in gains))
+print(round(10 ** (head / 20.0), 6))
+print(width_on if d.get('surround') else 1.0)
+PY
+) || return 1
+  { read -r gains; read -r mult; read -r width; } <<<"$vals"
+  read -r -a g <<<"$gains"
+
+  {
+    echo "# omarchy-eq: generated from $STATE. Edits are overwritten."
+    echo "context.modules = ["
+    echo "  { name = libpipewire-module-filter-chain"
+    echo "    args = {"
+    echo "      node.description = \"$SINK_DESC\""
+    echo "      media.name       = \"$SINK_DESC\""
+    echo "      filter.graph = {"
+    echo "        nodes = ["
+    for ch in l r; do
+      for i in "${!BANDS[@]}"; do
+        printf '          { type = builtin name = eq%s_%s label = bq_peaking control = { "Freq" = %s "Q" = %s "Gain" = %s } }\n' \
+          "$i" "$ch" "${BANDS[$i]}" "$Q" "${g[$i]:-0}"
+      done
+      # Gain stage first: attenuating before the biquads is what actually
+      # prevents clipping, since a boosted band clips inside the filter itself.
+      # `linear` takes a raw multiplier, so dB is converted here.
+      printf '          { type = builtin name = pre_%s label = linear control = { "Mult" = %s "Add" = 0.0 } }\n' "$ch" "$mult"
+    done
+    # Mid/side stereo widener. mid=(L+R)/2, side=(L-R)/2; out = mid +/- width*side.
+    # At width 1.0 this reconstructs L and R exactly.
+    echo '          { type = builtin name = mid   label = mixer  control = { "Gain 1" = 0.5 "Gain 2" = 0.5 } }'
+    echo '          { type = builtin name = rinv  label = invert }'
+    echo '          { type = builtin name = side  label = mixer  control = { "Gain 1" = 0.5 "Gain 2" = 0.5 } }'
+    echo '          { type = builtin name = sinv  label = invert }'
+    printf '          { type = builtin name = outl  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = %s } }\n' "$width"
+    printf '          { type = builtin name = outr  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = %s } }\n' "$width"
+    echo "        ]"
+    echo "        links = ["
+    for ch in l r; do
+      printf '          { output = "pre_%s:Out" input = "eq0_%s:In" }\n' "$ch" "$ch"
+      for ((i=0; i<${#BANDS[@]}-1; i++)); do
+        printf '          { output = "eq%s_%s:Out" input = "eq%s_%s:In" }\n' "$i" "$ch" "$((i+1))" "$ch"
+      done
+    done
+    LAST=$((${#BANDS[@]}-1))
+    printf '          { output = "eq%s_l:Out" input = "mid:In 1" }\n'  "$LAST"
+    printf '          { output = "eq%s_r:Out" input = "mid:In 2" }\n'  "$LAST"
+    printf '          { output = "eq%s_r:Out" input = "rinv:In" }\n'   "$LAST"
+    printf '          { output = "eq%s_l:Out" input = "side:In 1" }\n' "$LAST"
+    echo '          { output = "rinv:Out" input = "side:In 2" }'
+    echo '          { output = "side:Out" input = "sinv:In" }'
+    echo '          { output = "mid:Out"  input = "outl:In 1" }'
+    echo '          { output = "side:Out" input = "outl:In 2" }'
+    echo '          { output = "mid:Out"  input = "outr:In 1" }'
+    echo '          { output = "sinv:Out" input = "outr:In 2" }' 
+    echo "        ]"
+    echo "        inputs  = [ \"pre_l:In\"  \"pre_r:In\" ]"
+    echo "        outputs = [ \"outl:Out\" \"outr:Out\" ]"
+    echo "      }"
+    echo "      audio.channels = 2"
+    echo "      audio.position = [ FL FR ]"
+    echo "      capture.props = {"
+    echo "        node.name   = \"omarchy_eq\""
+    echo "        media.class = Audio/Sink"
+    echo "      }"
+    echo "      playback.props = {"
+    echo "        node.name   = \"omarchy_eq_out\""
+    echo "        node.passive = true"
+    echo "      }"
+    echo "    }"
+    echo "  }"
+    echo "]"
+  } >"$FRAGMENT.tmp.$$" && mv -f "$FRAGMENT.tmp.$$" "$FRAGMENT"
+}
+
+# The PipeWire *global* node id (not pactl's PulseAudio-compat id).
+node_id() {
+  # NB: POSIX awk has no \b, so anchor on the line shape instead.
+  pw-cli ls Node 2>/dev/null | awk '
+    /^[[:space:]]*id [0-9]+,/ { match($0, /id [0-9]+/); id = substr($0, RSTART+3, RLENGTH-3) }
+    /node\.name = "omarchy_eq"$/ { print id; exit }'
+}
+
+# Push the whole curve into the running filter with no restart. Restarting the
+# service drops the sink, which makes players (Rhythmbox) lose their stream and
+# pause - and dragging a slider restarted it fast enough to trip systemd's
+# start-rate limit and kill the service outright.
+live_apply() {
+  local id; id=$(node_id)
+  [[ -n $id ]] || return 1
+  local params; params=$(python3 -c "
+import json,os
+d=json.load(open(os.path.expanduser('~/.config/omarchy/eq.json')))
+import math
+WIDTH_ON=$WIDTH_ON
+gains=[float(g) for g in d['gains']]
+# Same auto-headroom rule as generate(), so live and regenerated agree.
+pre=-max([0.0]+gains)
+pre=round(pre + float(d.get('preamp',0)), 2)
+mult=round(10 ** (pre / 20.0), 6)
+out=[]
+for i,g in enumerate(gains):
+    for ch in ('l','r'):
+        out.append('\"eq%d_%s:Gain\" %s' % (i, ch, g))
+for ch in ('l','r'):
+    out.append('\"pre_%s:Mult\" %s' % (ch, mult))
+w = WIDTH_ON if d.get('surround') else 1.0
+out.append('\"outl:Gain 2\" %s' % w)
+out.append('\"outr:Gain 2\" %s' % w)
+print(' '.join(out))") || return 1
+  pw-cli set-param "$id" Props "{ params = [ $params ] }" >/dev/null 2>&1
+}
+
+# Only used when the graph must actually be rebuilt (enable/disable), or when
+# the filter is not running so there is nothing live to talk to.
+restart() {
+  systemctl --user daemon-reload 2>/dev/null
+  if [[ $(json_get enabled) == True || $(json_get enabled) == true ]]; then
+    systemctl --user reset-failed "$UNIT" 2>/dev/null
+    systemctl --user restart "$UNIT" 2>/dev/null
+  else
+    systemctl --user stop "$UNIT" 2>/dev/null
+  fi
+}
+
+# Write the config for the next start, then update the running filter in place.
+# Falls back to a restart only if the filter is not currently up.
+apply_live_or_restart() {
+  generate || return 1
+  live_apply || restart
+}
+
+set_band() {
+  local key="$1" val="$2" idx=-1
+  for i in "${!BANDS[@]}"; do [[ ${BANDS[$i]} == "$key" ]] && idx=$i; done
+  [[ $key =~ ^[0-9]$ ]] && idx=$key
+  [[ $idx -lt 0 ]] && { echo "unknown band '$key' (use an index 0-9 or one of: ${BANDS[*]})" >&2; exit 1; }
+  python3 - "$idx" "$val" <<'PY'
+import json,sys,os
+p=os.path.expanduser('~/.config/omarchy/eq.json')
+d=json.load(open(p))
+v=max(-12.0,min(12.0,float(sys.argv[2])))
+d['gains'][int(sys.argv[1])]=v
+# Editing a band *is* the custom curve: remember it, so switching to a named
+# preset and back to Custom restores exactly what was dialled in.
+d['custom']=list(d['gains'])
+d['active']='custom'
+json.dump(d,open(p,'w'))
+PY
+}
+
+ensure_state
+case "${1:-status}" in
+  get)
+    python3 - <<'PY'
+import json,os
+d=json.load(open(os.path.expanduser('~/.config/omarchy/eq.json')))
+d.setdefault('custom',[0]*10)
+d['preset']=d.get('active')
+print(json.dumps(d))
+PY
+    ;;
+  status)
+    python3 - <<'PY'
+import json,os,subprocess
+d=json.load(open(os.path.expanduser('~/.config/omarchy/eq.json')))
+bands=[31,62,125,250,500,1000,2000,4000,8000,16000]
+act=subprocess.run(['systemctl','--user','is-active','omarchy-eq.service'],
+                   capture_output=True,text=True).stdout.strip()
+print("equalizer: %s (service %s)"%("enabled" if d['enabled'] else "disabled",act))
+print("surround : %s"%("on" if d.get('surround') else "off"))
+print("preamp   : %+.1f dB"%d['preamp'])
+for b,g in zip(bands,d['gains']):
+    label=("%dk"%(b//1000)) if b>=1000 else str(b)
+    bar="#"*int(round(abs(g)))
+    print("  %-5s %+6.1f dB %s"%(label,g,bar))
+PY
+    ;;
+  set)    set_band "${2:?band}" "${3:?dB}"; apply_live_or_restart || exit 1; echo "band ${2} -> ${3} dB" ;;
+  preamp)
+    python3 - "${2:?dB}" <<'PY'
+import json,sys,os
+p=os.path.expanduser('~/.config/omarchy/eq.json')
+d=json.load(open(p))
+d['preamp']=max(-12.0,min(12.0,float(sys.argv[1])))
+json.dump(d,open(p,'w'))
+PY
+    apply_live_or_restart || exit 1; echo "preamp -> ${2} dB" ;;
+  preset)
+    # Unquoted heredoc so $(presets_py) expands; the block has no other $.
+    python3 - "${2:?preset}" <<PY
+import json,sys,os
+$(presets_py)
+n=sys.argv[1]
+p=os.path.expanduser('~/.config/omarchy/eq.json')
+d=json.load(open(p))
+if n == 'custom':
+    d['gains']=list(d.get('custom',[0]*10))
+elif n in P:
+    d['gains']=list(P[n])
+else:
+    print("presets: "+", ".join(list(P)+['custom']),file=sys.stderr); sys.exit(1)
+d['active']=n
+json.dump(d,open(p,'w'))
+print("preset: "+n)
+PY
+    # Only apply if the preset was recognised; otherwise the unknown name would
+    # print an error and then re-apply the current curve as if it had worked.
+    [[ ${PIPESTATUS[0]:-$?} -eq 0 ]] || exit 1
+    apply_live_or_restart || exit 1 ;;
+  surround)
+    python3 - "$STATE" "${2:?on|off}" <<'PY' || exit 1
+import json,sys
+if sys.argv[2] not in ('on','off'):
+    sys.exit("omarchy-eq: surround expects 'on' or 'off'")
+p=sys.argv[1]
+d=json.load(open(p)); d['surround']=(sys.argv[2]=='on'); json.dump(d,open(p,'w'))
+PY
+    apply_live_or_restart || exit 1; echo "surround ${2}" ;;
+  on|off)
+    python3 - "$STATE" "$1" <<'PY' || exit 1
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p)); d['enabled']=(sys.argv[2]=='on'); json.dump(d,open(p,'w'))
+PY
+    generate || exit 1; restart; echo "equalizer $1" ;;
+  apply)  apply_live_or_restart || exit 1; echo "applied" ;;
+  -h|--help|help) usage ;;
+  *) usage; exit 1 ;;
+esac

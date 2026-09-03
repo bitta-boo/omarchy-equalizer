@@ -1,0 +1,24 @@
+[Unit]
+# Gain changes are applied live, but a rebuild (enable/disable) still restarts
+# this. Disable the start-rate limit so a burst can never leave the service
+# stuck in "failed" with the audio sink gone.
+StartLimitIntervalSec=0
+Description=Omarchy 10-band equalizer (PipeWire filter-chain)
+# WirePlumber does the linking, so start after it is up.
+After=pipewire.service wireplumber.service
+Requires=pipewire.service
+Wants=wireplumber.service
+# The filter-chain loses its connection when PipeWire goes away.
+PartOf=pipewire.service
+
+[Service]
+Type=simple
+# Hosted as a PipeWire *client* under its own config name, mirroring Omarchy's
+# speaker tuning: restarting it does not drop every PulseAudio client, and a
+# malformed graph breaks only this service rather than the whole daemon.
+ExecStart=/usr/bin/pipewire -c omarchy-eq.conf
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

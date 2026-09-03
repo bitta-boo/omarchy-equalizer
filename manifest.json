@@ -1,0 +1,26 @@
+{
+  "schemaVersion": 1,
+  "id": "bitta-boo.equalizer",
+  "name": "Equalizer",
+  "version": "1.0.0",
+  "author": "bitta-boo",
+  "description": "10-band graphic equalizer for the PipeWire filter-chain",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Equalizer",
+    "description": "10-band graphic equalizer for the PipeWire filter-chain",
+    "category": "Audio",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "aliases": [
+      "equalizer",
+      "eq"
+    ]
+  },
+  "license": "MIT"
+}
