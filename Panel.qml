@@ -12,7 +12,7 @@ import qs.Ui
 // panel cannot leave the filter-chain in a weird state.
 Panel {
   id: root
-  moduleName: "bitta-boo.equalizer"
+  moduleName: "io.github.bitta-boo.equalizer"
   // No IpcHandler of our own: the base would register one for this id and a
   // clash there stops the widget being built at all.
   manageIpc: false

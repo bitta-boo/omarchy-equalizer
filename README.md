@@ -26,7 +26,7 @@ used, and there are no LV2 or LADSPA plugin dependencies.
 
 ```bash
 omarchy plugin add https://github.com/bitta-boo/omarchy-equalizer.git --enable
-~/.config/omarchy/plugins/bitta-boo.equalizer/install.sh
+~/.config/omarchy/plugins/io.github.bitta-boo.equalizer/install.sh
 ```
 
 The first command installs the bar widget. The second installs the DSP half —
@@ -152,8 +152,8 @@ edit.
 Or, if it was installed with `omarchy plugin add`:
 
 ```bash
-~/.config/omarchy/plugins/bitta-boo.equalizer/uninstall.sh
-omarchy plugin remove bitta-boo.equalizer
+~/.config/omarchy/plugins/io.github.bitta-boo.equalizer/uninstall.sh
+omarchy plugin remove io.github.bitta-boo.equalizer
 ```
 
 Removes the user service, the PipeWire host config and generated graph, the

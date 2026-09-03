@@ -2,7 +2,7 @@
 # Remove everything install.sh added. Backups (*.bak.*) are left in place.
 set -uo pipefail
 SRC=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
-PLUGIN_ID=$(python3 -c "import json;print(json.load(open('$SRC/manifest.json'))['id'])" 2>/dev/null || echo bitta-boo.equalizer)
+PLUGIN_ID=$(python3 -c "import json;print(json.load(open('$SRC/manifest.json'))['id'])" 2>/dev/null || echo io.github.bitta-boo.equalizer)
 
 systemctl --user disable --now omarchy-eq.service 2>/dev/null
 rm -f "$HOME/.config/systemd/user/omarchy-eq.service"
