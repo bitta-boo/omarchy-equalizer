@@ -1,4 +1,5 @@
 import QtQuick
+import Quickshell
 import Quickshell.Io
 import qs.Commons
 import qs.Ui
@@ -42,29 +43,107 @@ Panel {
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
 
-  function reload() {
-    probeProc.running = true
-    readProc.running = true
+  function reload() { root.launch(readProc, readDeadline, [root.eqBin, "get"]) }
+
+  // ---- process invocation -------------------------------------------------
+  //
+  // Every child process is launched from an absolute path with an explicit
+  // environment, a hard deadline, and a bounded, schema-checked output. The
+  // inherited PATH is not consulted, so nothing a caller puts on PATH can
+  // decide which binary this widget runs.
+  readonly property string home: Quickshell.env("HOME") || ""
+  readonly property string eqBin: home + "/.local/bin/omarchy-eq"
+
+  // Minimal environment. systemctl --user and pw-cli need the session bus and
+  // the runtime directory; nothing else is inherited.
+  readonly property var procEnv: ({
+    "PATH": "/usr/local/bin:/usr/bin:/bin",
+    "HOME": home,
+    "XDG_RUNTIME_DIR": Quickshell.env("XDG_RUNTIME_DIR") || "",
+    "DBUS_SESSION_BUS_ADDRESS": Quickshell.env("DBUS_SESSION_BUS_ADDRESS") || ""
+  })
+
+  readonly property int readDeadlineMs: 2500    // `get` only reads a small file
+  readonly property int cmdDeadlineMs: 8000     // writes may talk to pipewire
+  readonly property int maxOutputBytes: 65536   // `get` is well under 1 KiB
+
+  // Setting running=false terminates the process and its group, so a hung or
+  // absent producer cannot leave a child alive or the panel waiting forever.
+  function killProc(proc) { if (proc.running) proc.running = false }
+
+  // Always arm the deadline before starting, never from onRunningChanged: if the
+  // executable does not exist, `running` never transitions to true, so a handler
+  // hung off it would never arm the very timeout meant to catch that case.
+  function launch(proc, deadline, args) {
+    proc.command = args
+    deadline.restart()
+    proc.running = true
   }
 
-  // Detects a missing backend. Deliberately NOT readProc's exit code: when the
-  // executable does not exist, Quickshell's Process never emits `exited` at all,
-  // so the widget would sit there looking functional and do nothing. Probing
-  // through sh gives a process that always launches and always reports, and it
-  // separates "not installed" from "installed but errored".
+  // A missing executable is detected here rather than by an exit code: when the
+  // binary does not exist Quickshell's Process never emits `exited` at all, so
+  // the read deadline is what tells us the backend is not installed.
+  Timer {
+    id: readDeadline
+    interval: root.readDeadlineMs
+    onTriggered: {
+      root.killProc(readProc)
+      root.backendMissing = true
+      root.loaded = false
+    }
+  }
+  Timer { id: writeDeadline;    interval: root.cmdDeadlineMs; onTriggered: root.killProc(writeProc) }
+  Timer { id: preampDeadline;   interval: root.cmdDeadlineMs; onTriggered: root.killProc(preampProc) }
+  Timer { id: toggleDeadline;   interval: root.cmdDeadlineMs; onTriggered: root.killProc(toggleProc) }
+  Timer { id: presetDeadline;   interval: root.cmdDeadlineMs; onTriggered: root.killProc(presetProc) }
+  Timer { id: surroundDeadline; interval: root.cmdDeadlineMs; onTriggered: root.killProc(surroundProc) }
+
+  // Rejects anything that is not the exact shape `omarchy-eq get` produces, so
+  // a corrupted or oversized state file cannot drive the UI.
+  function parseState(text) {
+    if (typeof text !== "string" || text.length === 0 || text.length > root.maxOutputBytes) return null
+    var d
+    try { d = JSON.parse(text) } catch (e) { return null }
+    if (!d || typeof d !== "object" || !Array.isArray(d.gains) || d.gains.length !== 10) return null
+    var g = []
+    for (var i = 0; i < 10; i++) {
+      var v = d.gains[i]
+      if (typeof v !== "number" || !isFinite(v) || v < -12 || v > 12) return null
+      g.push(v)
+    }
+    var pre = (typeof d.preamp === "number" && isFinite(d.preamp)) ? Math.max(-12, Math.min(12, d.preamp)) : 0
+    var preset = (typeof d.preset === "string" && d.preset.length <= 32) ? d.preset : ""
+    return { gains: g, preamp: pre, surround: !!d.surround, enabled: !!d.enabled, preset: preset }
+  }
+
   Process {
-    id: probeProc
-    command: ["sh", "-c", "command -v omarchy-eq >/dev/null 2>&1"]
+    id: readProc
+    clearEnvironment: true
+    environment: root.procEnv
     onExited: function(exitCode) {
-      root.backendMissing = (exitCode !== 0)
-      if (root.backendMissing) root.loaded = false
+      readDeadline.stop()
+      // It launched, so it exists. A non-zero exit means installed-but-failing,
+      // which is a different state from not installed.
+      root.backendMissing = false
+      if (exitCode !== 0) root.loaded = false
+    }
+    stdout: StdioCollector {
+      onStreamFinished: {
+        var d = root.parseState(text)
+        if (d === null) { root.loaded = false; return }
+        root.gains = d.gains
+        root.preamp = d.preamp
+        root.surround = d.surround
+        root.activePreset = d.preset
+        root.enabled = d.enabled
+        root.loaded = true
+      }
     }
   }
 
-  // Writes are debounced only lightly. `omarchy-eq set` now pushes the value
-  // into the running filter with pw-cli instead of restarting the service, so a
-  // change is inaudible-in-progress rather than dropping the sink (which made
-  // Rhythmbox lose its stream and pause).
+  // Writes are debounced only lightly. `omarchy-eq set` pushes the value into
+  // the running filter with pw-cli instead of restarting the service, so a
+  // change is inaudible-in-progress rather than dropping the sink.
   property int pendingBand: -1
   property real pendingValue: 0
 
@@ -87,36 +166,19 @@ Panel {
     interval: 80
     onTriggered: {
       if (root.pendingBand < 0) return
-      writeProc.command = ["omarchy-eq", "set", String(root.pendingBand), String(Math.round(root.pendingValue * 10) / 10)]
-      writeProc.running = true
+      root.launch(writeProc, writeDeadline, [root.eqBin, "set", String(root.pendingBand), String(Math.round(root.pendingValue * 10) / 10)])
       root.pendingBand = -1
-    }
-  }
-
-  Process {
-    id: readProc
-    command: ["omarchy-eq", "get"]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        try {
-          var d = JSON.parse(text)
-          root.gains = d.gains
-          root.preamp = d.preamp || 0
-          root.surround = !!d.surround
-          root.activePreset = d.preset || ""
-          root.enabled = !!d.enabled
-          root.loaded = true
-        } catch (e) {
-          root.loaded = false
-        }
-      }
     }
   }
 
   // No reload on completion: `commit` has already put the value in `gains`, and
   // re-reading would race a drag still in progress and snap the knob backwards.
-  Process { id: writeProc }
-  Process { id: preampProc }
+  Process {
+    id: writeProc
+    clearEnvironment: true
+    environment: root.procEnv
+    onExited: writeDeadline.stop()
+  }
 
   property real pendingPreamp: 0
   function commitPreamp(v) {
@@ -128,24 +190,35 @@ Panel {
     id: preampTimer
     interval: 80
     onTriggered: {
-      preampProc.command = ["omarchy-eq", "preamp", String(root.pendingPreamp)]
-      preampProc.running = true
+      root.launch(preampProc, preampDeadline, [root.eqBin, "preamp", String(root.pendingPreamp)])
     }
+  }
+  Process {
+    id: preampProc
+    clearEnvironment: true
+    environment: root.procEnv
+    onExited: preampDeadline.stop()
   }
 
   Process {
     id: toggleProc
-    onExited: root.reload()
+    clearEnvironment: true
+    environment: root.procEnv
+    onExited: { toggleDeadline.stop(); root.reload() }
   }
 
   Process {
     id: presetProc
-    onExited: root.reload()
+    clearEnvironment: true
+    environment: root.procEnv
+    onExited: { presetDeadline.stop(); root.reload() }
   }
 
   Process {
     id: surroundProc
-    onExited: root.reload()
+    clearEnvironment: true
+    environment: root.procEnv
+    onExited: { surroundDeadline.stop(); root.reload() }
   }
 
   Component.onCompleted: reload()
@@ -158,8 +231,7 @@ Panel {
       checked: root.enabled
       foreground: hero.foreground
       onToggled: {
-        toggleProc.command = ["omarchy-eq", root.enabled ? "off" : "on"]
-        toggleProc.running = true
+        root.launch(toggleProc, toggleDeadline, [root.eqBin, root.enabled ? "off" : "on"])
       }
       PanelToolTip {
         visible: eqSwitch.containsMouse
@@ -181,8 +253,7 @@ Panel {
     opacity: (root.enabled && !root.backendMissing) ? 1.0 : 0.6
     onPressed: function(buttonCode) {
       if (buttonCode === Qt.RightButton) {
-        toggleProc.command = ["omarchy-eq", root.enabled ? "off" : "on"]
-        toggleProc.running = true
+        root.launch(toggleProc, toggleDeadline, [root.eqBin, root.enabled ? "off" : "on"])
       } else {
         root.toggle()
       }
@@ -378,8 +449,7 @@ Panel {
           checked: root.surround
           foreground: root.foreground
           onClicked: {
-            surroundProc.command = ["omarchy-eq", "surround", root.surround ? "off" : "on"]
-            surroundProc.running = true
+            root.launch(surroundProc, surroundDeadline, [root.eqBin, "surround", root.surround ? "off" : "on"])
           }
         }
 
@@ -401,8 +471,7 @@ Panel {
             onClicked: {
               root.activePreset = "flat"
               root.commitPreamp(0)
-              presetProc.command = ["omarchy-eq", "preset", "flat"]
-              presetProc.running = true
+              root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "flat"])
             }
           }
           Button {
@@ -410,21 +479,21 @@ Panel {
             foreground: root.foreground
             bordered: true
             selected: root.activePreset === "treble"
-            onClicked: { root.activePreset = "treble"; presetProc.command = ["omarchy-eq", "preset", "treble"]; presetProc.running = true }
+            onClicked: { root.activePreset = "treble"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "treble"]) }
           }
           Button {
             text: "Gaming"
             foreground: root.foreground
             bordered: true
             selected: root.activePreset === "gaming"
-            onClicked: { root.activePreset = "gaming"; presetProc.command = ["omarchy-eq", "preset", "gaming"]; presetProc.running = true }
+            onClicked: { root.activePreset = "gaming"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "gaming"]) }
           }
           Button {
             text: "Vocal"
             foreground: root.foreground
             bordered: true
             selected: root.activePreset === "vocal"
-            onClicked: { root.activePreset = "vocal"; presetProc.command = ["omarchy-eq", "preset", "vocal"]; presetProc.running = true }
+            onClicked: { root.activePreset = "vocal"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "vocal"]) }
           }
           // Recalls whatever was last dialled in by hand. Editing any band writes
           // into this slot, so switching away and back restores those changes.
@@ -433,7 +502,7 @@ Panel {
             foreground: root.foreground
             bordered: true
             selected: root.activePreset === "custom"
-            onClicked: { root.activePreset = "custom"; presetProc.command = ["omarchy-eq", "preset", "custom"]; presetProc.running = true }
+            onClicked: { root.activePreset = "custom"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "custom"]) }
           }
 
         }
