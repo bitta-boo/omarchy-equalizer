@@ -95,8 +95,8 @@ centres 31 Hz–16 kHz, Q=1.41 → a shared mid/side widener.
 
 The widener computes `mid = (L+R)/2`, `side = (L-R)/2` and outputs
 `mid ± width·side`. At `width = 1.0` that reconstructs L and R exactly, so the
-stage lives in the graph permanently and the Surround toggle is only a mixer
-gain change — no rebuild, no dropout.
+stage lives in the graph permanently, so the Surround toggle is only a mixer
+gain change rather than a different graph.
 
 Surround costs no headroom. The widener only amplifies the *difference* between
 the channels, so centred content passes at exactly unity and typical stereo
@@ -122,6 +122,11 @@ as applied, and never reached the audio until something else restarted the
 service. The reload drops the sink briefly, which is why the panel writes on
 release rather than on every drag tick.
 
+Reloading destroys the sink, and WirePlumber responds by moving every stream to
+another output and switching the default away — which silently takes the
+equalizer out of the audio path. So the streams pointed at the sink, and whether
+it was the default, are recorded before the reload and restored after it.
+
 The preamp sits at the **head** of the chain, because attenuating before the
 biquads is what prevents clipping; a boosted band clips inside the filter
 itself, where an output-side trim could not help.
@@ -137,7 +142,7 @@ manifest.json               plugin manifest (must be at the repo root)
 Panel.qml                   the Omarchy bar widget
 preview.png                 panel screenshot used by this README
 install.sh / uninstall.sh   installers for the DSP half
-bin/omarchy-eq              CLI, graph generator, live updates
+bin/omarchy-eq              CLI, graph generator, apply/verify logic
 pipewire/omarchy-eq.conf    filter-chain host config
 systemd/omarchy-eq.service  user service
 ```

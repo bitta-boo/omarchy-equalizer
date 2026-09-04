@@ -1,7 +1,8 @@
 [Unit]
-# Gain changes are applied live, but a rebuild (enable/disable) still restarts
-# this. Disable the start-rate limit so a burst can never leave the service
-# stuck in "failed" with the audio sink gone.
+# Every change restarts this: PipeWire does not accept filter-chain control
+# changes at runtime, so the graph is regenerated and reloaded. Disable the
+# start-rate limit so a burst of edits can never leave the service stuck in
+# "failed" with the audio sink gone.
 StartLimitIntervalSec=0
 Description=Omarchy 10-band equalizer (PipeWire filter-chain)
 # WirePlumber does the linking, so start after it is up.

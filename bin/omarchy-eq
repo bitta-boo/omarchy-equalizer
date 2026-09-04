@@ -66,7 +66,7 @@ usage: omarchy-eq <command>
   preset <name>          flat | treble | bass-up | vocal | loudness | gaming | custom
                          custom recalls whatever you last dialled in by hand
   on | off               enable/disable the equalizer sink
-  surround on|off        stereo widening (mid/side), applied live
+  surround on|off        stereo widening (mid/side)
   apply                  regenerate the graph and restart the service
 
 examples:

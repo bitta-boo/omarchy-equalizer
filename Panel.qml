@@ -154,9 +154,9 @@ Panel {
     }
   }
 
-  // Writes are debounced only lightly. `omarchy-eq set` pushes the value into
-  // the running filter with pw-cli instead of restarting the service, so a
-  // change is inaudible-in-progress rather than dropping the sink.
+  // Applying a change reloads the filter, so a write is deliberately one per
+  // gesture: `preview` moves the model while dragging and this only runs on
+  // release. The debounce below collapses the release into a single write.
   property int pendingBand: -1
   property real pendingValue: 0
 
