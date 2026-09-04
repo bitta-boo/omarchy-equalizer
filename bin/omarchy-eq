@@ -32,7 +32,6 @@ PW_CLI=$(resolve pw-cli)
 AWK=$(resolve awk)
 SYSTEMCTL=$(resolve systemctl)
 MKDIR=$(resolve mkdir)
-MV=$(resolve mv)
 
 STATE="$HOME/.config/omarchy/eq.json"
 FRAGMENT="$HOME/.config/pipewire/omarchy-eq.conf.d/90-eq.conf"
@@ -83,7 +82,7 @@ P={"flat":[0]*10,
    # the low-mids pulled back so explosions do not mask speech, a presence lift
    # through 2-4k where dialogue intelligibility and positional cues (footsteps,
    # direction) live, and air on top. Peaks at +4 so it costs the same 4 dB of
-   # headroom as bass-down.
+   # headroom as the other shaped presets.
    "gaming":[2,1,-1,-2,-1,1,3,4,3,2],
    # Speech / podcasts. Rumble and plosives cut below ~125, the 250 Hz
    # boxiness pulled out, presence lifted through 1-4k where consonants and
@@ -106,9 +105,48 @@ PY
 #   - writes go to an O_EXCL temporary in the same directory and land with
 #     os.replace, so a reader never observes a partial file
 STATE_PY=$(cat <<'HELPERPY'
-import json, os, stat, sys
+import fcntl, json, os, stat, sys
 
 MAX_STATE_BYTES = 65536
+
+_lock_fd = None
+
+def lock(path):
+    """Serialise read-modify-write across concurrent invocations.
+
+    A slider drag, the preamp slider and a preset click each shell out
+    separately, so two processes could read the same state, each modify one
+    field, and the second write would discard the first. The lock is taken on a
+    dedicated file rather than the state file itself, because save() replaces
+    the state inode and a lock on the old one would protect nothing. It is
+    released when the process exits.
+    """
+    global _lock_fd
+    try:
+        _lock_fd = os.open(path + ".lock",
+                           os.O_WRONLY | os.O_CREAT | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+                           0o600)
+        fcntl.flock(_lock_fd, fcntl.LOCK_EX)
+    except OSError:
+        _lock_fd = None          # locking is best-effort; never block the edit
+
+def num(value, default=0.0, lo=-12.0, hi=12.0):
+    """A finite number in range, or the default. Never raises."""
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    if v != v or v in (float("inf"), float("-inf")):
+        return default
+    return max(lo, min(hi, v))
+
+def gains_of(d):
+    """Exactly ten sane gains, whatever the file actually contains."""
+    g = d.get("gains")
+    if not isinstance(g, list):
+        g = []
+    g = list(g)[:10] + [0.0] * max(0, 10 - len(g))
+    return [num(x) for x in g]
 
 def _fail(msg):
     sys.stderr.write("omarchy-eq: %s\n" % msg)
@@ -199,7 +237,14 @@ PY
 json_get() {
   run_py "$STATE" "$1" 2>/dev/null <<'PY'
 d = load(sys.argv[1])
-print(json.dumps(d) if sys.argv[2] == 'all' else d[sys.argv[2]])
+if sys.argv[2] == 'all':
+    print(json.dumps(d))
+else:
+    # `enabled` defaults to true. A missing key or an unreadable file must not
+    # be indistinguishable from "disabled", because restart() reads this to
+    # decide whether to stop the service - and silently stopping the user's
+    # audio is the worst possible reading of an absent value.
+    print(d.get(sys.argv[2], True if sys.argv[2] == 'enabled' else ''))
 PY
 }
 
@@ -357,7 +402,11 @@ PY
 # the filter is not running so there is nothing live to talk to.
 restart() {
   "$SYSTEMCTL" --user daemon-reload 2>/dev/null
-  if [[ $(json_get enabled) == True || $(json_get enabled) == true ]]; then
+  # Anything that is not an explicit false keeps the service running: an empty
+  # result means the state could not be read at all, which is not consent to
+  # stop the equalizer.
+  local want; want=$(json_get enabled)
+  if [[ $want != False && $want != false ]]; then
     "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
     "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
   else
@@ -379,6 +428,7 @@ set_band() {
   [[ $idx -lt 0 ]] && { echo "unknown band '$key' (use an index 0-9 or one of: ${BANDS[*]})" >&2; exit 1; }
   run_py "$idx" "$val" "$STATE" <<'PY'
 p = sys.argv[3]
+lock(p)
 d = load(p)
 v=max(-12.0,min(12.0,float(sys.argv[2])))
 d['gains'][int(sys.argv[1])]=v
@@ -395,8 +445,12 @@ case "${1:-status}" in
   get)
     run_py "$STATE" <<'PY'
 d = load(sys.argv[1])
-d.setdefault('custom',[0]*10)
-d['preset']=d.get('active')
+d['gains'] = gains_of(d)
+d['custom'] = gains_of({'gains': d.get('custom')})
+d['preamp'] = num(d.get('preamp'))
+d['enabled'] = bool(d.get('enabled', True))
+d['surround'] = bool(d.get('surround', False))
+d['preset'] = d.get('active') if isinstance(d.get('active'), str) else ''
 print(json.dumps(d))
 PY
     ;;
@@ -404,13 +458,14 @@ PY
     run_py "$STATE" "$SYSTEMCTL" <<'PY'
 import subprocess
 d = load(sys.argv[1])
+gains = gains_of(d)
 bands=[31,62,125,250,500,1000,2000,4000,8000,16000]
 act=subprocess.run([sys.argv[2],'--user','is-active','omarchy-eq.service'],
                    capture_output=True,text=True).stdout.strip()
-print("equalizer: %s (service %s)"%("enabled" if d['enabled'] else "disabled",act))
+print("equalizer: %s (service %s)"%("enabled" if d.get('enabled', True) else "disabled",act))
 print("surround : %s"%("on" if d.get('surround') else "off"))
-print("preamp   : %+.1f dB"%d['preamp'])
-for b,g in zip(bands,d['gains']):
+print("preamp   : %+.1f dB"%num(d.get('preamp')))
+for b,g in zip(bands,gains):
     label=("%dk"%(b//1000)) if b>=1000 else str(b)
     bar="#"*int(round(abs(g)))
     print("  %-5s %+6.1f dB %s"%(label,g,bar))
@@ -420,6 +475,7 @@ PY
   preamp)
     run_py "${2:?dB}" "$STATE" <<'PY'
 p = sys.argv[2]
+lock(p)
 d = load(p)
 d['preamp']=max(-12.0,min(12.0,float(sys.argv[1])))
 save(p, d)
@@ -431,6 +487,7 @@ PY
 $(presets_py)
 n=sys.argv[1]
 p=sys.argv[2]
+lock(p)
 d=load(p)
 if n == 'custom':
     d['gains']=list(d.get('custom',[0]*10))
@@ -451,12 +508,14 @@ PY
 if sys.argv[2] not in ('on','off'):
     _fail("surround expects 'on' or 'off'")
 p = sys.argv[1]
+lock(p)
 d = load(p); d['surround'] = (sys.argv[2] == 'on'); save(p, d)
 PY
     apply_live_or_restart || exit 1; echo "surround ${2}" ;;
   on|off)
     run_py "$STATE" "$1" <<'PY' || exit 1
 p = sys.argv[1]
+lock(p)
 d = load(p); d['enabled'] = (sys.argv[2] == 'on'); save(p, d)
 PY
     generate || exit 1; restart; echo "equalizer $1" ;;

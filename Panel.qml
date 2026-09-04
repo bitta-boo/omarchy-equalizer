@@ -80,6 +80,12 @@ Panel {
   // executable does not exist, `running` never transitions to true, so a handler
   // hung off it would never arm the very timeout meant to catch that case.
   function launch(proc, deadline, args) {
+    // Setting running=true on a process that is already running is a no-op, so
+    // the new command would be silently dropped - two quick preset clicks, or a
+    // slider moved while the previous write is still in flight. The newer
+    // command is always the one the user meant, so the in-flight one is
+    // terminated first and superseded.
+    if (proc.running) root.killProc(proc)
     proc.command = args
     deadline.restart()
     proc.running = true
