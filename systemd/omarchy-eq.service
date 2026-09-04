@@ -1,7 +1,8 @@
 [Unit]
-# Every change restarts this: PipeWire does not accept filter-chain control
-# changes at runtime, so the graph is regenerated and reloaded. Disable the
-# start-rate limit so a burst of edits can never leave the service stuck in
+# Curve changes are normally applied to the running filter without touching
+# this service. It is restarted only when the graph structure changes, or when
+# the sink is suspended and the filter discards live parameter writes. Disable
+# the start-rate limit so a burst of edits can never leave the service stuck in
 # "failed" with the audio sink gone.
 StartLimitIntervalSec=0
 Description=Omarchy 10-band equalizer (PipeWire filter-chain)

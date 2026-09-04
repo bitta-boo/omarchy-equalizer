@@ -485,9 +485,10 @@ for side in ('outl', 'outr'):
 PY
 }
 
-# In practice this runs for every change: PipeWire does not accept filter-chain
-# control changes at runtime, so live_apply's verification fails and the graph
-# is reloaded instead. Routing is preserved across the reload, below.
+# The fallback when a live parameter write does not take - most often because
+# the sink is suspended, where the filter discards them. Routing is preserved
+# across the reload, below, since destroying the sink stops anything playing
+# into it.
 # Reloading the filter destroys the sink. WirePlumber reacts by moving every
 # stream onto another output and switching the default away, so the equalizer
 # silently leaves the audio path and nothing sounds any different no matter what
@@ -577,9 +578,8 @@ restart() {
   fi
 
   "$SYSTEMCTL" --user daemon-reload 2>/dev/null
-  # The service always runs. Bypass is a flat graph, not a stopped service:
-  # stopping destroys the sink and anything playing through it stops too, which
-  # is not what toggling an equalizer off should do.
+  # The service always runs. Bypass is a routing change, not a stopped service:
+  # stopping destroys the sink and anything playing through it stops with it.
   "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
   "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
   run_py "$FRAGMENT" "$APPLIED" <<'PY' 2>/dev/null || true

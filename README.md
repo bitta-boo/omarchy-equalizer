@@ -10,9 +10,7 @@ filter-chain plus a bar widget of vertical faders.
 - **No external plugins.** Uses PipeWire's *builtin* `bq_peaking` biquads and a
   `linear` gain stage — no LV2, no LSP/Calf, nothing outside the base system.
 - **Applied on release.** Dragging a fader previews the curve; letting go
-  applies it. PipeWire does not accept filter-chain control changes at runtime,
-  so applying reloads the filter — briefly, and once per gesture rather than
-  continuously while you drag.
+  applies it, so a drag is one change rather than a stream of them.
 - **Automatic headroom.** The preamp is set to `-max(boost)` so a boosted curve
   cannot clip, with a manual offset available on top.
 - **Surround toggle.** Mid/side stereo widening that flips live and leaves the
@@ -99,16 +97,13 @@ Each channel runs `linear` (preamp) → ten `bq_peaking` biquads at the ISO octa
 centres 31 Hz–16 kHz, Q=1.41 → a shared mid/side widener.
 
 The widener computes `mid = (L+R)/2`, `side = (L-R)/2` and outputs
-`mid ± (side + extra·highpass(side))`. The unfiltered side term is always at
-unity, so with `extra = 0` this reconstructs L and R exactly and the toggle off
-is a true passthrough.
+`mid ± width·side`. At `width = 1.0` that reconstructs L and R exactly, so the
+stage lives in the graph permanently and switching off is a true passthrough.
 
-Widening adds high-passed side on top. Only the difference signal above 250 Hz
-is widened, which keeps bass and kick centred — that is what lets the width go
-to 3.0 and sound wide rather than hollow. Widening the full band, as a plain
-`mid ± width·side` does, mostly thins the low end while barely changing the
-impression of width, because there is little stereo information down there to
-widen in the first place.
+The effect is deliberately subtle. A wider setting with the side path
+high-passed was tried and rejected: it read as reverb rather than width,
+because heavy side energy through the midrange smears anything centred in the
+image.
 
 Surround costs no headroom. The widener only amplifies the *difference* between
 the channels, so centred content passes at exactly unity and typical stereo

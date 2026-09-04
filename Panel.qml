@@ -166,10 +166,10 @@ Panel {
   property int pendingBand: -1
   property real pendingValue: 0
 
-  // Dragging only moves the model; the write happens on release. Applying a
-  // change now costs a filter restart (PipeWire does not accept filter-chain
-  // control changes at runtime), so writing on every drag tick would restart
-  // the sink repeatedly across a single gesture.
+  // Dragging only moves the model; the write happens on release. One write per
+  // gesture rather than one every 80 ms: each write shells out, and if the sink
+  // happens to be suspended it also reloads the filter, so a drag would
+  // otherwise produce a burst of them.
   function preview(index, value) {
     var next = gains.slice()
     next[index] = Math.round(value * 2) / 2
