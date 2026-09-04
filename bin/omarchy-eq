@@ -459,8 +459,9 @@ for side in ('outl', 'outr'):
 PY
 }
 
-# Only used when the graph must actually be rebuilt (enable/disable), or when
-# the filter is not running so there is nothing live to talk to.
+# In practice this runs for every change: PipeWire does not accept filter-chain
+# control changes at runtime, so live_apply's verification fails and the graph
+# is reloaded instead. Routing is preserved across the reload, below.
 # Reloading the filter destroys the sink. WirePlumber reacts by moving every
 # stream onto another output and switching the default away, so the equalizer
 # silently leaves the audio path and nothing sounds any different no matter what
