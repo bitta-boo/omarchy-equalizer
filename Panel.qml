@@ -67,9 +67,14 @@ Panel {
   readonly property int cmdDeadlineMs: 8000     // writes may talk to pipewire
   readonly property int maxOutputBytes: 65536   // `get` is well under 1 KiB
 
-  // Setting running=false terminates the process and its group, so a hung or
-  // absent producer cannot leave a child alive or the panel waiting forever.
-  function killProc(proc) { if (proc.running) proc.running = false }
+  // SIGTERM first, then clear `running`. Signalling is what actually terminates
+  // a hung producer; clearing `running` alone only detaches Quickshell's side.
+  readonly property int sigTerm: 15
+  function killProc(proc) {
+    if (!proc.running) return
+    proc.signal(root.sigTerm)
+    proc.running = false
+  }
 
   // Always arm the deadline before starting, never from onRunningChanged: if the
   // executable does not exist, `running` never transitions to true, so a handler
@@ -221,15 +226,13 @@ Panel {
     onExited: { surroundDeadline.stop(); root.reload() }
   }
 
-  // Explicit teardown. Quickshell's Process exposes no kill signal or process
-  // group control, so `running = false` is the only mechanism available; what
-  // this adds is that it is applied to every process, and every timer stopped,
-  // at destruction, rather than relying on a process ending on its own or a
-  // timer firing against an item that is already gone.
+  // Explicit teardown: every child is sent SIGTERM and every timer stopped when
+  // the widget is destroyed, rather than relying on a process ending by itself
+  // or a timer firing against an item that is already gone.
   Component.onDestruction: {
     var procs = [readProc, writeProc, preampProc, toggleProc, presetProc, surroundProc]
     for (var i = 0; i < procs.length; i++) {
-      if (procs[i].running) procs[i].running = false
+      root.killProc(procs[i])
     }
     var timers = [readDeadline, writeDeadline, preampDeadline, toggleDeadline,
                   presetDeadline, surroundDeadline, writeTimer, preampTimer]
