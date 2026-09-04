@@ -47,6 +47,10 @@ FRAGMENT="$HOME/.config/pipewire/omarchy-eq.conf.d/90-eq.conf"
 # it distinguishes a change of control values, which the filter accepts live,
 # from a change of nodes or links, which it cannot.
 APPLIED="$FRAGMENT.applied"
+# Streams moved off the sink for a reload. Persisted because a second reload
+# arriving while they are parked would otherwise snapshot an empty sink and
+# never move them back, stranding audio on the output device for good.
+PARKED="$FRAGMENT.parked"
 UNIT=omarchy-eq.service
 SINK_DESC="Equalizer"
 
@@ -528,6 +532,24 @@ apply_bypass() {
   "$PACTL" set-default-sink "$to" 2>/dev/null
 }
 
+# Whether audio is actually passing through the filter. The default sink is not
+# the answer: a stream can sit on another device while the default still points
+# here, which is exactly how a stranded stream went unnoticed.
+routed_now() {
+  [[ -n $PACTL ]] || { printf 0; return; }
+  local eq own n
+  eq=$(sink_id); own=$(own_stream)
+  if [[ -n $eq ]]; then
+    n=$("$PACTL" list short sink-inputs 2>/dev/null |
+        "$AWK" -v s="$eq" -v o="$own" '$2 == s && $1 != o { c++ } END { print c + 0 }')
+    [[ ${n:-0} -gt 0 ]] && { printf 1; return; }
+    # nothing playing anywhere: fall back to where new audio would go
+    n=$("$PACTL" list short sink-inputs 2>/dev/null | "$AWK" -v o="$own" '$1 != o { c++ } END { print c + 0 }')
+    [[ ${n:-0} -eq 0 ]] && [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]] && { printf 1; return; }
+  fi
+  printf 0
+}
+
 sink_id() { [[ -n $PACTL ]] && "$PACTL" list short sinks 2>/dev/null | "$AWK" '$2=="omarchy_eq"{print $1; exit}'; }
 
 restart() {
@@ -550,6 +572,7 @@ restart() {
     for si in $streams; do
       [[ $si == "$own" ]] && continue
       "$PACTL" move-sink-input "$si" "$down" 2>/dev/null
+      printf '%s\n' "$si" >> "$PARKED" 2>/dev/null
     done
   fi
 
@@ -572,11 +595,23 @@ PY
   done
   [[ -n $eqsink ]] || return
   [[ -n $was_default ]] && "$PACTL" set-default-sink omarchy_eq 2>/dev/null
+
+  # Bypassed means the streams are meant to be off the sink; leave them there.
+  local want; want=$(json_get enabled)
+  if [[ $want == False || $want == false ]]; then
+    rm -f "$PARKED" 2>/dev/null
+    return 0
+  fi
+
+  # Anything parked by this reload, plus anything a previous reload parked and
+  # failed to bring back.
+  own=$(own_stream)
   local si
-  for si in $streams; do
-    [[ $si == "$own" ]] && continue
+  for si in $(cat "$PARKED" 2>/dev/null; printf '%s\n' $streams); do
+    [[ -z $si || $si == "$own" ]] && continue
     "$PACTL" move-sink-input "$si" "$eqsink" 2>/dev/null
   done
+  rm -f "$PARKED" 2>/dev/null
   return 0
 }
 
@@ -632,10 +667,7 @@ PY
 ensure_state
 case "${1:-status}" in
   get)
-    routed=0
-    if [[ -n $PACTL ]] && [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]]; then
-      routed=1
-    fi
+    routed=$(routed_now)
     run_py "$STATE" "$routed" <<'PY'
 d = load(sys.argv[1])
 # Whether audio is actually routed through the filter, which is not the same as
@@ -652,10 +684,7 @@ print(json.dumps(d))
 PY
     ;;
   status)
-    routed=0
-    if [[ -n $PACTL ]] && [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]]; then
-      routed=1
-    fi
+    routed=$(routed_now)
     run_py "$STATE" "$SYSTEMCTL" "$routed" <<'PY'
 import subprocess
 d = load(sys.argv[1])
