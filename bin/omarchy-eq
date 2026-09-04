@@ -33,6 +33,14 @@ AWK=$(resolve awk)
 SYSTEMCTL=$(resolve systemctl)
 MKDIR=$(resolve mkdir)
 
+# Optional: only used to put audio back where it was after a reload. Absent
+# pactl degrades to the old behaviour rather than failing.
+resolve_opt() {
+  local found; found=$(command -v "$1" 2>/dev/null) || true
+  [[ -n $found && $found == /* && -x $found ]] && printf '%s' "$found"
+}
+PACTL=$(resolve_opt pactl)
+
 STATE="$HOME/.config/omarchy/eq.json"
 FRAGMENT="$HOME/.config/pipewire/omarchy-eq.conf.d/90-eq.conf"
 UNIT=omarchy-eq.service
@@ -420,7 +428,21 @@ PY
 
 # Only used when the graph must actually be rebuilt (enable/disable), or when
 # the filter is not running so there is nothing live to talk to.
+# Reloading the filter destroys the sink. WirePlumber reacts by moving every
+# stream onto another output and switching the default away, so the equalizer
+# silently leaves the audio path and nothing sounds any different no matter what
+# is changed. Record what was pointed at the sink, reload, then put it back.
+sink_id() { [[ -n $PACTL ]] && "$PACTL" list short sinks 2>/dev/null | "$AWK" '$2=="omarchy_eq"{print $1; exit}'; }
+
 restart() {
+  local was_default="" streams="" eqsink=""
+  if [[ -n $PACTL ]]; then
+    eqsink=$(sink_id)
+    [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]] && was_default=1
+    [[ -n $eqsink ]] && streams=$("$PACTL" list short sink-inputs 2>/dev/null |
+      "$AWK" -v s="$eqsink" '$2==s{print $1}')
+  fi
+
   "$SYSTEMCTL" --user daemon-reload 2>/dev/null
   # Anything that is not an explicit false keeps the service running: an empty
   # result means the state could not be read at all, which is not consent to
@@ -431,7 +453,23 @@ restart() {
     "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
   else
     "$SYSTEMCTL" --user stop "$UNIT" 2>/dev/null
+    return
   fi
+
+  [[ -n $PACTL ]] || return
+  local i
+  for i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    eqsink=$(sink_id)
+    [[ -n $eqsink ]] && break
+    sleep 0.2
+  done
+  [[ -n $eqsink ]] || return
+  [[ -n $was_default ]] && "$PACTL" set-default-sink omarchy_eq 2>/dev/null
+  local si
+  for si in $streams; do
+    "$PACTL" move-sink-input "$si" "$eqsink" 2>/dev/null
+  done
+  return 0
 }
 
 # Write the config for the next start, then update the running filter in place.
