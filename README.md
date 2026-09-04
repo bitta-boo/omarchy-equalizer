@@ -99,9 +99,16 @@ Each channel runs `linear` (preamp) → ten `bq_peaking` biquads at the ISO octa
 centres 31 Hz–16 kHz, Q=1.41 → a shared mid/side widener.
 
 The widener computes `mid = (L+R)/2`, `side = (L-R)/2` and outputs
-`mid ± width·side`. At `width = 1.0` that reconstructs L and R exactly, so the
-stage lives in the graph permanently, so the Surround toggle is only a mixer
-gain change rather than a different graph.
+`mid ± (side + extra·highpass(side))`. The unfiltered side term is always at
+unity, so with `extra = 0` this reconstructs L and R exactly and the toggle off
+is a true passthrough.
+
+Widening adds high-passed side on top. Only the difference signal above 250 Hz
+is widened, which keeps bass and kick centred — that is what lets the width go
+to 3.0 and sound wide rather than hollow. Widening the full band, as a plain
+`mid ± width·side` does, mostly thins the low end while barely changing the
+impression of width, because there is little stereo information down there to
+widen in the first place.
 
 Surround costs no headroom. The widener only amplifies the *difference* between
 the channels, so centred content passes at exactly unity and typical stereo

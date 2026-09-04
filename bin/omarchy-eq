@@ -43,6 +43,9 @@ PACTL=$(resolve_opt pactl)
 
 STATE="$HOME/.config/omarchy/eq.json"
 FRAGMENT="$HOME/.config/pipewire/omarchy-eq.conf.d/90-eq.conf"
+# Touched whenever the running filter is known to have loaded $FRAGMENT. If the
+# fragment is newer than this, the graph on disk is not the graph in memory.
+APPLIED="$FRAGMENT.applied"
 UNIT=omarchy-eq.service
 SINK_DESC="Equalizer"
 
@@ -51,9 +54,17 @@ SINK_DESC="Equalizer"
 BANDS=(31 62 125 250 500 1000 2000 4000 8000 16000)
 Q=1.41
 # Stereo width for the surround toggle. mid+side reconstructs the original
-# channel exactly at 1.0, so "off" is a true passthrough and switching is a
-# live gain change rather than a graph rebuild.
-WIDTH_ON=1.6
+# channel exactly at 1.0, so "off" is a true passthrough.
+#
+# 1.6 was barely audible. Widening acts on the *difference* between the
+# channels, and music carries little of that below a few hundred hertz, so a
+# modest width spends its effect where there is little to widen while thinning
+# the bass. High-passing the side path keeps the low end centred, which is what
+# allows a much larger width without the sound going hollow.
+WIDTH_ON=3.0
+# Below this the difference signal is left out of the widening entirely, so bass
+# and kick stay centred where they belong.
+SIDE_HP_HZ=250
 
 usage() {
   cat <<EOF
@@ -155,7 +166,7 @@ def effective(d, width_on):
     changing the graph, so the curve stays loaded and switching back on is
     instant rather than a reload.
     """
-    return gains_of(d), num(d.get("preamp")), (width_on if d.get("surround") else 1.0)
+    return gains_of(d), num(d.get("preamp")), ((width_on - 1.0) if d.get("surround") else 0.0)
 
 def gains_of(d):
     """Exactly ten sane gains, whatever the file actually contains."""
@@ -212,6 +223,13 @@ def save(path, obj):
     if len(data) > MAX_STATE_BYTES:
         _fail("refusing to write %d bytes to %s" % (len(data), path))
     _write_atomic(path, data, 0o600)
+
+def load_text(path):
+    fd = _open_ro(path)
+    try:
+        return os.read(fd, 1 << 20).decode("utf-8")
+    finally:
+        os.close(fd)
 
 def write_text(path, text):
     _write_atomic(path, text.encode("utf-8") if isinstance(text, str) else text, 0o644)
@@ -326,14 +344,21 @@ PY
       # `linear` takes a raw multiplier, so dB is converted here.
       printf '          { type = builtin name = pre_%s label = linear control = { "Mult" = %s "Add" = 0.0 } }\n' "$ch" "$mult"
     done
-    # Mid/side stereo widener. mid=(L+R)/2, side=(L-R)/2; out = mid +/- width*side.
-    # At width 1.0 this reconstructs L and R exactly.
+    # Mid/side stereo widener. mid=(L+R)/2, side=(L-R)/2.
+    #
+    # The output is mid + side + extra*highpass(side). The unfiltered side term
+    # is always at unity, so with extra = 0 this reconstructs L and R exactly
+    # and "off" is a true passthrough. Widening then *adds* high-passed side on
+    # top, which leaves bass and kick centred - that is what makes a large width
+    # sound wide rather than hollow.
     echo '          { type = builtin name = mid   label = mixer  control = { "Gain 1" = 0.5 "Gain 2" = 0.5 } }'
     echo '          { type = builtin name = rinv  label = invert }'
     echo '          { type = builtin name = side  label = mixer  control = { "Gain 1" = 0.5 "Gain 2" = 0.5 } }'
     echo '          { type = builtin name = sinv  label = invert }'
-    printf '          { type = builtin name = outl  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = %s } }\n' "$width"
-    printf '          { type = builtin name = outr  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = %s } }\n' "$width"
+    printf '          { type = builtin name = sidehp label = bq_highpass control = { "Freq" = %s "Q" = 0.707 } }\n' "$SIDE_HP_HZ"
+    echo '          { type = builtin name = shinv label = invert }'
+    printf '          { type = builtin name = outl  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = 1.0 "Gain 3" = %s } }\n' "$width"
+    printf '          { type = builtin name = outr  label = mixer  control = { "Gain 1" = 1.0 "Gain 2" = 1.0 "Gain 3" = %s } }\n' "$width"
     echo "        ]"
     echo "        links = ["
     for ch in l r; do
@@ -347,12 +372,16 @@ PY
     printf '          { output = "eq%s_r:Out" input = "mid:In 2" }\n'  "$LAST"
     printf '          { output = "eq%s_r:Out" input = "rinv:In" }\n'   "$LAST"
     printf '          { output = "eq%s_l:Out" input = "side:In 1" }\n' "$LAST"
-    echo '          { output = "rinv:Out" input = "side:In 2" }'
-    echo '          { output = "side:Out" input = "sinv:In" }'
-    echo '          { output = "mid:Out"  input = "outl:In 1" }'
-    echo '          { output = "side:Out" input = "outl:In 2" }'
-    echo '          { output = "mid:Out"  input = "outr:In 1" }'
-    echo '          { output = "sinv:Out" input = "outr:In 2" }' 
+    echo '          { output = "rinv:Out"   input = "side:In 2" }'
+    echo '          { output = "side:Out"   input = "sinv:In" }'
+    echo '          { output = "side:Out"   input = "sidehp:In" }'
+    echo '          { output = "sidehp:Out" input = "shinv:In" }'
+    echo '          { output = "mid:Out"    input = "outl:In 1" }'
+    echo '          { output = "side:Out"   input = "outl:In 2" }'
+    echo '          { output = "sidehp:Out" input = "outl:In 3" }'
+    echo '          { output = "mid:Out"    input = "outr:In 1" }'
+    echo '          { output = "sinv:Out"   input = "outr:In 2" }'
+    echo '          { output = "shinv:Out"  input = "outr:In 3" }'
     echo "        ]"
     echo "        inputs  = [ \"pre_l:In\"  \"pre_r:In\" ]"
     echo "        outputs = [ \"outl:Out\" \"outr:Out\" ]"
@@ -371,8 +400,18 @@ PY
     echo "  }"
     echo "]"
   )
+  # Written only when it differs, so the modification time is a reliable signal
+  # that the graph changed rather than just that something ran.
   run_py "$FRAGMENT" "$frag" <<'PY'
-write_text(sys.argv[1], sys.argv[2] + "\n")
+path, text = sys.argv[1], sys.argv[2] + "\n"
+try:
+    if load_text(path) == text:
+        raise SystemExit(0)
+except SystemExit:
+    raise
+except Exception:
+    pass
+write_text(path, text)
 PY
 }
 
@@ -404,8 +443,8 @@ for i,g in enumerate(gains):
         out.append('\"eq%d_%s:Gain\" %s' % (i, ch, g))
 for ch in ('l','r'):
     out.append('\"pre_%s:Mult\" %s' % (ch, mult))
-out.append('\"outl:Gain 2\" %s' % width)
-out.append('"outr:Gain 2" %s' % width)
+out.append('\"outl:Gain 3\" %s' % width)
+out.append('"outr:Gain 3" %s' % width)
 print(' '.join(out))
 PY
 ) || return 1
@@ -452,7 +491,7 @@ for ch in ('l', 'r'):
         raise SystemExit(1)
 
 for side in ('outl', 'outr'):
-    if not same('%s:Gain 2' % side, width, 0.0005):
+    if not same('%s:Gain 3' % side, width, 0.0005):
         raise SystemExit(1)
 PY
 }
@@ -521,6 +560,7 @@ restart() {
   # is not what toggling an equalizer off should do.
   "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
   "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
+  : > "$APPLIED" 2>/dev/null
 
   [[ -n $PACTL ]] || return
   local i
@@ -541,7 +581,20 @@ restart() {
 # Write the config for the next start, then update the running filter in place.
 # Falls back to a restart only if the filter is not currently up.
 apply_live_or_restart() {
+  # If the generated graph differs at all from the one that is running, reload.
+  # Param writes can only retune existing controls; they cannot add a node,
+  # rewire a link, or change what a control means. A structural change that got
+  # verified only by the controls it happens to touch will leave the filter
+  # running the old graph while every check reports agreement - which is exactly
+  # how a stale widener survived here with the wrong passthrough gain.
   generate || return 1
+  # The graph on disk is newer than the one the filter loaded, so no amount of
+  # parameter setting can bring them together - a param write can retune an
+  # existing control but cannot add a node or rewire a link. Reload.
+  if [[ ! -e $APPLIED || $FRAGMENT -nt $APPLIED ]]; then
+    restart
+    return
+  fi
   live_apply || restart
 }
 
