@@ -45,13 +45,13 @@ The filter does nothing until audio routes through it.
 
 ## Usage
 
-Click the sliders icon in the bar. The panel gives you ten bands, a `pre`
-(preamp) slider, a Surround toggle, and five preset buttons. The remaining
-presets are available from the CLI.
+Click the sliders icon in the bar. The panel gives you ten vertical faders, a
+preamp slider, a Surround toggle, and five preset buttons. The remaining presets
+are available from the CLI.
 
-- **Drag** a slider to change a band; it applies as you move.
-- **Right-click** a slider to zero that band. Right-click `pre` to return it to
-  fully automatic headroom.
+- **Drag** a fader to change a band; it applies as you move.
+- **Right-click** a fader to zero that band. Right-click the preamp to return it
+  to fully automatic headroom.
 - **Flat** clears the bands *and* the preamp.
 - The header shows the resulting headroom, so the loudness trade-off is visible.
 - The active preset is highlighted.

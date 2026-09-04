@@ -38,7 +38,8 @@ Panel {
   }
   property bool loaded: false
   property bool backendMissing: false
-  readonly property int labelSize: Style.font.bodySmall
+  readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
+  readonly property real faderLength: Style.space(140)
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
@@ -291,8 +292,10 @@ Panel {
     bar: root.bar
     open: root.opened
     focusTarget: keyCatcher
-    contentWidth: panel.fittedContentWidth(Style.space(360))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(620))
+    // Display's panel proportions: a 380-wide body, capped height with the
+    // content scrolling inside rather than growing the popup.
+    contentWidth: panel.fittedContentWidth(Style.space(380))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(560))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -305,14 +308,16 @@ Panel {
       anchors.left: parent.left
       anchors.right: parent.right
       anchors.top: parent.top
-      spacing: Style.spacing.sm
+      // Style.space(14) between sections and Style.space(6) inside them is the
+      // rhythm the Display panel uses; the shared components below carry the
+      // rest of the house styling.
+      spacing: Style.space(14)
 
-      // House style: hero header with the on/off as a trailing ToggleSwitch,
-      // matching the Bluetooth and Dropbox panels, rather than a Disable button.
       PanelHero {
         id: hero
         width: column.width
         title: "Equalizer"
+        fontFamily: root.fontFamily
         meta: root.backendMissing
               ? "NOT INSTALLED"
               : root.enabled
@@ -321,8 +326,8 @@ Panel {
         iconOpacity: (root.enabled && !root.backendMissing) ? 1.0 : 0.5
         iconComponent: Component {
           Text {
-            text: "\uf1de"                       // nf-fa-sliders
-            font.family: Style.font.family
+            text: ""                       // nf-fa-sliders
+            font.family: root.fontFamily
             font.pixelSize: Style.font.display
             color: hero.foreground
           }
@@ -336,17 +341,17 @@ Panel {
       Column {
         width: column.width
         visible: root.backendMissing
-        spacing: Style.spacing.sm
+        spacing: Style.space(6)
 
         PanelSeparator { foreground: root.foreground }
 
         Text {
-          width: column.width
+          width: parent.width
           text: "The equalizer backend is not installed, so there is nothing to control yet.\n\n"
                 + "Run  ~/.config/omarchy/plugins/" + root.moduleName + "/install.sh\n\n"
                 + "then reopen this panel."
           color: root.dim
-          font.family: Style.font.family
+          font.family: root.fontFamily
           font.pixelSize: Style.font.body
           wrapMode: Text.WordWrap
         }
@@ -356,34 +361,133 @@ Panel {
         id: body
         width: column.width
         visible: !root.backendMissing
-        spacing: Style.spacing.sm
+        spacing: Style.space(14)
 
         PanelSeparator { foreground: root.foreground }
 
-        // Manual level offset. Headroom is otherwise set automatically to
-        // -max(boost); raising this trades that headroom back for loudness.
-        Item {
-          width: column.width
-          height: Style.space(30)
+        // ---------- Bands: vertical faders, the way an equalizer is read ----
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
 
-          Text {
-            id: preLabel
-            anchors.left: parent.left
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(34)
-            text: "pre"
-            color: root.foreground
-            opacity: root.enabled ? 0.85 : 0.4
-            font.pixelSize: root.labelSize
+          PanelSectionHeader {
+            text: "BANDS"
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+          }
+
+          Row {
+            id: bandRow
+            width: parent.width
+            spacing: 0
+
+            Repeater {
+              model: root.bandLabels.length
+
+              Item {
+                id: cell
+                width: Math.floor(bandRow.width / root.bandLabels.length)
+                height: readout.implicitHeight + Style.space(6)
+                        + root.faderLength + Style.space(6) + bandLabel.implicitHeight
+
+                Text {
+                  id: readout
+                  anchors.top: parent.top
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: (fader.liveValue >= 0 ? "+" : "") + fader.liveValue.toFixed(1)
+                  color: root.foreground
+                  opacity: root.enabled ? 0.75 : 0.35
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+
+                // PanelSlider is horizontal only, so the shared control is used
+                // as-is and rotated. That keeps the house track, fill, knob,
+                // tick marks and drag behaviour instead of reimplementing them.
+                Item {
+                  id: faderBox
+                  anchors.top: readout.bottom
+                  anchors.topMargin: Style.space(6)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  width: cell.width
+                  height: root.faderLength
+
+                  PanelSlider {
+                    id: fader
+                    bar: root.bar
+                    anchors.centerIn: parent
+                    width: faderBox.height          // length runs vertically
+                    height: faderBox.width          // thickness
+                    rotation: -90
+                    minimum: -12
+                    maximum: 12
+                    step: 0.5
+                    tickCount: 5                    // centre notch marks 0 dB
+                    // Fill matched to the track: PanelSlider fills from the
+                    // minimum, so on a -12..+12 scale a flat band would look
+                    // half full and a cut would be indistinguishable from a
+                    // boost at a glance. The knob carries the value instead,
+                    // the way a hardware fader does.
+                    fillColor: fader.trackColor
+                    value: root.loaded ? root.gains[index] : 0
+                    opacity: root.enabled ? 1 : 0.45
+                    onMoved: function(v) { root.commit(index, v) }
+                    onReleased: function(v) { root.commit(index, v) }
+                    onRightClicked: root.commit(index, 0)
+                  }
+                }
+
+                Text {
+                  id: bandLabel
+                  anchors.top: faderBox.bottom
+                  anchors.topMargin: Style.space(6)
+                  anchors.horizontalCenter: parent.horizontalCenter
+                  text: root.bandLabels[index]
+                  color: root.foreground
+                  opacity: root.enabled ? 0.85 : 0.4
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.caption
+                }
+              }
+            }
+          }
+        }
+
+        PanelSeparator { foreground: root.foreground }
+
+        // ---------- Preamp ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
+
+          Item {
+            width: parent.width
+            implicitHeight: Math.max(preHeader.implicitHeight, preReadout.implicitHeight)
+
+            PanelSectionHeader {
+              id: preHeader
+              text: "PREAMP"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              id: preReadout
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              text: (preSlider.liveValue >= 0 ? "+" : "") + preSlider.liveValue.toFixed(1) + " dB"
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              font.bold: true
+              font.letterSpacing: 1.2
+            }
           }
 
           PanelSlider {
             id: preSlider
             bar: root.bar
-            anchors.left: preLabel.right
-            anchors.right: preReadout.left
-            anchors.rightMargin: Style.spacing.sm
-            anchors.verticalCenter: parent.verticalCenter
+            width: parent.width
             minimum: -12
             maximum: 12
             step: 0.5
@@ -392,83 +496,18 @@ Panel {
             opacity: root.enabled ? 1 : 0.45
             onMoved: function(v) { root.commitPreamp(v) }
             onReleased: function(v) { root.commitPreamp(v) }
-            // Right-click resets to 0 = fully automatic headroom. Landing exactly
-            // on the centre by dragging is fiddly.
+            // Right-click resets to 0 = fully automatic headroom; landing on the
+            // centre by dragging is fiddly.
             onRightClicked: root.commitPreamp(0)
           }
-
-          Text {
-            id: preReadout
-            anchors.right: parent.right
-            anchors.verticalCenter: parent.verticalCenter
-            width: Style.space(46)
-            horizontalAlignment: Text.AlignRight
-            text: (preSlider.liveValue >= 0 ? "+" : "") + preSlider.liveValue.toFixed(1)
-            color: root.foreground
-            opacity: root.enabled ? 0.7 : 0.35
-            font.pixelSize: root.labelSize
-          }
         }
 
         PanelSeparator { foreground: root.foreground }
 
-        Repeater {
-          model: root.bandLabels.length
-
-          Item {
-            width: column.width
-            height: Style.space(30)
-
-            Text {
-              id: label
-              anchors.left: parent.left
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(34)
-              text: root.bandLabels[index]
-              color: root.foreground
-              opacity: root.enabled ? 0.85 : 0.4
-              font.pixelSize: root.labelSize
-            }
-
-            PanelSlider {
-              id: slider
-              bar: root.bar
-              anchors.left: label.right
-              anchors.right: readout.left
-              anchors.rightMargin: Style.spacing.sm
-              anchors.verticalCenter: parent.verticalCenter
-              minimum: -12
-              maximum: 12
-              step: 0.5
-              tickCount: 5              // centre notch marks 0 dB
-              value: root.loaded ? root.gains[index] : 0
-              opacity: root.enabled ? 1 : 0.45
-              onMoved: function(v) { root.commit(index, v) }
-              onReleased: function(v) { root.commit(index, v) }
-              onRightClicked: root.commit(index, 0)
-            }
-
-            Text {
-              id: readout
-              anchors.right: parent.right
-              anchors.verticalCenter: parent.verticalCenter
-              width: Style.space(46)
-              horizontalAlignment: Text.AlignRight
-              text: (slider.liveValue >= 0 ? "+" : "") + slider.liveValue.toFixed(1)
-              color: root.foreground
-              opacity: root.enabled ? 0.7 : 0.35
-              font.pixelSize: root.labelSize
-            }
-          }
-        }
-
-        PanelSeparator { foreground: root.foreground }
-
-
-        // Stereo widening. Implemented as a mid/side stage whose width is a live
-        // mixer gain, so this flips instantly and the bands keep working.
+        // Stereo widening. A live mixer-gain change, so it flips instantly and
+        // the bands keep working.
         Toggle {
-          width: column.width
+          width: parent.width
           label: "Surround"
           checked: root.surround
           foreground: root.foreground
@@ -479,56 +518,94 @@ Panel {
 
         PanelSeparator { foreground: root.foreground }
 
-        // Flow rather than Row: the preset buttons now exceed one row at this
-        // panel width, and Row would clip rather than wrap.
-        Flow {
-          width: column.width
-          spacing: Style.spacing.sm
+        // ---------- Presets ----------
+        Column {
+          width: parent.width
+          spacing: Style.space(6)
 
-          Button {
-            text: "Flat"
+          PanelSectionHeader {
+            text: "PRESETS"
             foreground: root.foreground
-            bordered: true
-            selected: root.activePreset === "flat"
-            // Zero the bands *and* the manual preamp, so one click is a complete
-            // return to neutral rather than leaving a stray offset behind.
-            onClicked: {
-              root.activePreset = "flat"
-              root.commitPreamp(0)
-              root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "flat"])
+            fontFamily: root.fontFamily
+          }
+
+          // Centred *and* wrapping, without inflating anything. A Flow packs
+          // left and leaves the slack on the right; a Row centres but cannot
+          // wrap. Sizing the Flow to the natural width of its buttons lets the
+          // anchor centre it, and falling back to the full width when they do
+          // not fit makes it wrap instead of spilling out of the popup. Buttons
+          // keep their own widths - forcing them all to the widest label pushed
+          // the total past the panel and broke the row for no reason.
+          Item {
+            width: parent.width
+            implicitHeight: presetRow.implicitHeight
+
+            Flow {
+              id: presetRow
+              anchors.horizontalCenter: parent.horizontalCenter
+              spacing: Style.space(6)
+
+              readonly property real naturalWidth:
+                bFlat.implicitWidth + bTreble.implicitWidth + bGaming.implicitWidth
+                + bVocal.implicitWidth + bCustom.implicitWidth + spacing * 4
+
+              width: naturalWidth <= parent.width ? naturalWidth : parent.width
+
+              Button {
+                id: bFlat
+                text: "Flat"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                selected: root.activePreset === "flat"
+                // Zero the bands *and* the manual preamp, so one click is a
+                // complete return to neutral rather than leaving a stray offset.
+                onClicked: {
+                  root.activePreset = "flat"
+                  root.commitPreamp(0)
+                  root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "flat"])
+                }
+              }
+              Button {
+                id: bTreble
+                text: "Treble"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                selected: root.activePreset === "treble"
+                onClicked: { root.activePreset = "treble"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "treble"]) }
+              }
+              Button {
+                id: bGaming
+                text: "Gaming"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                selected: root.activePreset === "gaming"
+                onClicked: { root.activePreset = "gaming"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "gaming"]) }
+              }
+              Button {
+                id: bVocal
+                text: "Vocal"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                selected: root.activePreset === "vocal"
+                onClicked: { root.activePreset = "vocal"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "vocal"]) }
+              }
+              // Recalls whatever was last dialled in by hand. Editing any band
+              // writes into this slot, so switching away and back restores it.
+              Button {
+                id: bCustom
+                text: "Custom"
+                foreground: root.foreground
+                fontFamily: root.fontFamily
+                bordered: true
+                selected: root.activePreset === "custom"
+                onClicked: { root.activePreset = "custom"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "custom"]) }
+              }
             }
           }
-          Button {
-            text: "Treble"
-            foreground: root.foreground
-            bordered: true
-            selected: root.activePreset === "treble"
-            onClicked: { root.activePreset = "treble"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "treble"]) }
-          }
-          Button {
-            text: "Gaming"
-            foreground: root.foreground
-            bordered: true
-            selected: root.activePreset === "gaming"
-            onClicked: { root.activePreset = "gaming"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "gaming"]) }
-          }
-          Button {
-            text: "Vocal"
-            foreground: root.foreground
-            bordered: true
-            selected: root.activePreset === "vocal"
-            onClicked: { root.activePreset = "vocal"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "vocal"]) }
-          }
-          // Recalls whatever was last dialled in by hand. Editing any band writes
-          // into this slot, so switching away and back restores those changes.
-          Button {
-            text: "Custom"
-            foreground: root.foreground
-            bordered: true
-            selected: root.activePreset === "custom"
-            onClicked: { root.activePreset = "custom"; root.launch(presetProc, presetDeadline, [root.eqBin, "preset", "custom"]) }
-          }
-
         }
       }
     }
