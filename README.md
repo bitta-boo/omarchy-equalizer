@@ -60,10 +60,9 @@ are available from the CLI.
 - **Custom** remembers whatever you dial in by hand. Editing any band writes
   into that slot, so you can switch to a preset and back and your own curve is
   still there. It persists across reboots.
-- The toggle in the header bypasses the EQ. Bypass is a flat graph, not a
-  stopped service: the sink stays up and whatever is playing keeps playing,
-  just unprocessed. Your curve is remembered and comes back when you switch it
-  on again.
+- The toggle in the header bypasses the EQ by routing audio around it, not by
+  changing or unloading the filter. Playback is not interrupted and your curve
+  stays loaded, so switching back on is instant.
 - If the widget is installed but the DSP half is not, the panel says so and
   gives the command to run, rather than showing faders that do nothing.
 
@@ -75,7 +74,7 @@ omarchy-eq set 4000 3          # one band, by centre frequency or index 0-9
 omarchy-eq preamp 0            # manual offset; 0 = fully automatic
 omarchy-eq preset custom       # flat | treble | bass-up | vocal | loudness | gaming | custom
 omarchy-eq surround on | off   # stereo widening
-omarchy-eq on | off            # bypass; audio keeps playing, flat
+omarchy-eq on | off            # route around the equalizer, or back through it
 omarchy-eq apply               # regenerate the graph from the saved state
 ```
 

@@ -65,7 +65,7 @@ usage: omarchy-eq <command>
   preamp <dB>            manual level offset on top of the automatic headroom
   preset <name>          flat | treble | bass-up | vocal | loudness | gaming | custom
                          custom recalls whatever you last dialled in by hand
-  on | off               bypass the equalizer (audio keeps playing, flat)
+  on | off               route audio around the equalizer, or back through it
   surround on|off        stereo widening (mid/side)
   apply                  regenerate the graph and restart the service
 
@@ -149,14 +149,12 @@ def num(value, default=0.0, lo=-12.0, hi=12.0):
     return max(lo, min(hi, v))
 
 def effective(d, width_on):
-    """What is actually programmed into the filter.
+    """What is programmed into the filter.
 
-    Bypass is a flat graph, not a stopped service. Stopping destroys the sink,
-    and whatever is playing through it stops with it - toggling the equalizer
-    off should leave the music playing, just unprocessed.
+    Bypass is not represented here: it routes audio around the sink instead of
+    changing the graph, so the curve stays loaded and switching back on is
+    instant rather than a reload.
     """
-    if not d.get("enabled", True):
-        return [0.0] * 10, 0.0, 1.0
     return gains_of(d), num(d.get("preamp")), (width_on if d.get("surround") else 1.0)
 
 def gains_of(d):
@@ -466,6 +464,41 @@ PY
 # stream onto another output and switching the default away, so the equalizer
 # silently leaves the audio path and nothing sounds any different no matter what
 # is changed. Record what was pointed at the sink, reload, then put it back.
+# The sink the equalizer feeds - i.e. the real output device. Found from the
+# filter's own playback stream rather than assumed, so it follows whatever the
+# user's actual output is.
+downstream_sink() {
+  [[ -n $PACTL ]] || return
+  "$PACTL" list sink-inputs 2>/dev/null | "$AWK" '
+    /^Sink Input #/ { sink = "" }
+    /^[[:space:]]*Sink:/ { sink = $2 }
+    /node\.name = "omarchy_eq_out"/ { print sink; exit }'
+}
+
+# The filter's own output stream, which must never be moved.
+own_stream() {
+  [[ -n $PACTL ]] || return
+  "$PACTL" list sink-inputs 2>/dev/null | "$AWK" '
+    /^Sink Input #/ { id = substr($3, 2) }
+    /node\.name = "omarchy_eq_out"/ { print id; exit }'
+}
+
+# Bypass by routing, not by touching the filter. Reloading the graph destroys
+# the sink and anything playing into it stops - which is what made toggling the
+# equalizer off cut the music dead. Moving a stream between sinks is seamless.
+apply_bypass() {
+  [[ -n $PACTL ]] || return 0
+  local eq down own from to si
+  eq=$(sink_id); down=$(downstream_sink); own=$(own_stream)
+  [[ -n $eq && -n $down ]] || return 0
+  if [[ $1 == on ]]; then from=$down; to=$eq; else from=$eq; to=$down; fi
+  for si in $("$PACTL" list short sink-inputs 2>/dev/null |
+              "$AWK" -v f="$from" -v o="$own" '$2 == f && $1 != o { print $1 }'); do
+    "$PACTL" move-sink-input "$si" "$to" 2>/dev/null
+  done
+  "$PACTL" set-default-sink "$to" 2>/dev/null
+}
+
 sink_id() { [[ -n $PACTL ]] && "$PACTL" list short sinks 2>/dev/null | "$AWK" '$2=="omarchy_eq"{print $1; exit}'; }
 
 restart() {
@@ -604,7 +637,10 @@ p = sys.argv[1]
 lock(p)
 d = load(p); d['enabled'] = (sys.argv[2] == 'on'); save(p, d)
 PY
-    generate || exit 1; restart; echo "equalizer $1" ;;
+    # No reload: the graph is unchanged, only the routing moves.
+    generate || exit 1
+    apply_bypass "$1"
+    echo "equalizer $1" ;;
   apply)  apply_live_or_restart || exit 1; echo "applied" ;;
   -h|--help|help) usage ;;
   *) usage; exit 1 ;;
