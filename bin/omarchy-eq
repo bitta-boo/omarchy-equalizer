@@ -94,19 +94,112 @@ P={"flat":[0]*10,
 PY
 }
 
+# Every read and write of the state file and the generated fragment goes through
+# these helpers, which are prepended to each embedded Python program by run_py.
+#
+#   - O_NOFOLLOW: a symlink in the final path component is refused outright
+#   - fstat on the descriptor rather than stat on the path, so the size and
+#     file-type checks describe the object actually opened; there is no window
+#     in which the path can be swapped between the check and the read
+#   - a producer-side size cap, so an oversized state file is refused here and
+#     never reaches a consumer that would have to buffer it first
+#   - writes go to an O_EXCL temporary in the same directory and land with
+#     os.replace, so a reader never observes a partial file
+STATE_PY=$(cat <<'HELPERPY'
+import json, os, stat, sys
+
+MAX_STATE_BYTES = 65536
+
+def _fail(msg):
+    sys.stderr.write("omarchy-eq: %s\n" % msg)
+    raise SystemExit(1)
+
+def _open_ro(path):
+    try:
+        return os.open(path, os.O_RDONLY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0))
+    except OSError as e:
+        _fail("cannot open %s: %s" % (path, e))
+
+def load(path):
+    fd = _open_ro(path)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            _fail("%s is not a regular file" % path)
+        if st.st_size > MAX_STATE_BYTES:
+            _fail("%s is %d bytes, over the %d byte limit" % (path, st.st_size, MAX_STATE_BYTES))
+        raw = os.read(fd, MAX_STATE_BYTES + 1)
+    finally:
+        os.close(fd)
+    if len(raw) > MAX_STATE_BYTES:
+        _fail("%s exceeds the %d byte limit" % (path, MAX_STATE_BYTES))
+    try:
+        return json.loads(raw.decode("utf-8"))
+    except Exception as e:
+        _fail("%s is not valid JSON: %s" % (path, e))
+
+def _write_atomic(path, data, mode):
+    tmp = "%s.tmp.%d" % (path, os.getpid())
+    try:
+        os.unlink(tmp)
+    except OSError:
+        pass
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0), mode)
+    try:
+        os.write(fd, data)
+        os.fsync(fd)
+    finally:
+        os.close(fd)
+    os.replace(tmp, path)
+
+def save(path, obj):
+    data = json.dumps(obj).encode("utf-8")
+    if len(data) > MAX_STATE_BYTES:
+        _fail("refusing to write %d bytes to %s" % (len(data), path))
+    _write_atomic(path, data, 0o600)
+
+def write_text(path, text):
+    _write_atomic(path, text.encode("utf-8") if isinstance(text, str) else text, 0o644)
+HELPERPY
+)
+
+# Runs an embedded Python program supplied on stdin with the helpers prepended.
+# The program stays inside a quoted heredoc at the call site, so nothing in it
+# is expanded by the shell and no character needs escaping; arguments are passed
+# positionally and read from sys.argv.
+run_py() {
+  local prog; prog=$(cat)
+  printf '%s\n%s\n' "$STATE_PY" "$prog" | "$PYTHON" - "$@"
+}
+
+# Creates the state file only when absent, in a single O_EXCL|O_NOFOLLOW step
+# rather than testing the path and then writing to it.
 ensure_state() {
-  [[ -f $STATE ]] && return
   "$MKDIR" -p "$(dirname "$STATE")"
-  printf '{"enabled":true,"surround":false,"preamp":0,"active":"flat","gains":[0,0,0,0,0,0,0,0,0,0],"custom":[0,0,0,0,0,0,0,0,0,0]}\n' >"$STATE"
+  run_py "$STATE" <<'PY'
+import errno
+path = sys.argv[1]
+default = {"enabled": True, "surround": False, "preamp": 0, "active": "flat",
+           "gains": [0] * 10, "custom": [0] * 10}
+try:
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+except OSError as e:
+    if e.errno in (errno.EEXIST, errno.ELOOP):
+        raise SystemExit(0)
+    _fail("cannot create %s: %s" % (path, e))
+try:
+    os.write(fd, json.dumps(default).encode("utf-8"))
+finally:
+    os.close(fd)
+PY
 }
 
 # Argument goes through argv, never through the -c source: a key containing a
 # quote would otherwise escape the Python string literal and be executed.
 json_get() {
-  "$PYTHON" - "$STATE" "$1" 2>/dev/null <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
-print(json.dumps(d) if sys.argv[2]=='all' else d[sys.argv[2]])
+  run_py "$STATE" "$1" 2>/dev/null <<'PY'
+d = load(sys.argv[1])
+print(json.dumps(d) if sys.argv[2] == 'all' else d[sys.argv[2]])
 PY
 }
 
@@ -121,10 +214,9 @@ generate() {
   # 0, so the sink only vanished at the next reboot. Now it is a hard error and
   # the existing config is left untouched.
   local vals gains mult width
-  vals=$("$PYTHON" - "$STATE" "$WIDTH_ON" <<'PY'
-import json,sys
+  vals=$(run_py "$STATE" "$WIDTH_ON" <<'PY'
 path, width_on = sys.argv[1], float(sys.argv[2])
-d = json.load(open(path))
+d = load(path)
 g = d.get('gains')
 if not isinstance(g, list) or len(g) != 10:
     sys.exit("omarchy-eq: 'gains' must be a list of 10 numbers in %s" % path)
@@ -150,7 +242,10 @@ PY
   { read -r gains; read -r mult; read -r width; } <<<"$vals"
   read -r -a g <<<"$gains"
 
-  {
+  # Built into a variable and handed to the writer as an argument: run_py takes
+  # its program on stdin, so a program cannot also consume piped input.
+  local frag
+  frag=$(
     echo "# omarchy-eq: generated from $STATE. Edits are overwritten."
     echo "context.modules = ["
     echo "  { name = libpipewire-module-filter-chain"
@@ -213,7 +308,10 @@ PY
     echo "    }"
     echo "  }"
     echo "]"
-  } >"$FRAGMENT.tmp.$$" && "$MV" -f "$FRAGMENT.tmp.$$" "$FRAGMENT"
+  )
+  run_py "$FRAGMENT" "$frag" <<'PY'
+write_text(sys.argv[1], sys.argv[2] + "\n")
+PY
 }
 
 # The PipeWire *global* node id (not pactl's PulseAudio-compat id).
@@ -231,11 +329,10 @@ node_id() {
 live_apply() {
   local id; id=$(node_id)
   [[ -n $id ]] || return 1
-  local params; params=$("$PYTHON" -c "
-import json,os
-d=json.load(open(os.path.expanduser('~/.config/omarchy/eq.json')))
+  local params; params=$(run_py "$STATE" "$WIDTH_ON" <<'PY'
 import math
-WIDTH_ON=$WIDTH_ON
+d = load(sys.argv[1])
+WIDTH_ON = float(sys.argv[2])
 gains=[float(g) for g in d['gains']]
 # Same auto-headroom rule as generate(), so live and regenerated agree.
 pre=-max([0.0]+gains)
@@ -249,8 +346,10 @@ for ch in ('l','r'):
     out.append('\"pre_%s:Mult\" %s' % (ch, mult))
 w = WIDTH_ON if d.get('surround') else 1.0
 out.append('\"outl:Gain 2\" %s' % w)
-out.append('\"outr:Gain 2\" %s' % w)
-print(' '.join(out))") || return 1
+out.append('"outr:Gain 2" %s' % w)
+print(' '.join(out))
+PY
+) || return 1
   "$PW_CLI" set-param "$id" Props "{ params = [ $params ] }" >/dev/null 2>&1
 }
 
@@ -278,35 +377,33 @@ set_band() {
   for i in "${!BANDS[@]}"; do [[ ${BANDS[$i]} == "$key" ]] && idx=$i; done
   [[ $key =~ ^[0-9]$ ]] && idx=$key
   [[ $idx -lt 0 ]] && { echo "unknown band '$key' (use an index 0-9 or one of: ${BANDS[*]})" >&2; exit 1; }
-  "$PYTHON" - "$idx" "$val" <<'PY'
-import json,sys,os
-p=os.path.expanduser('~/.config/omarchy/eq.json')
-d=json.load(open(p))
+  run_py "$idx" "$val" "$STATE" <<'PY'
+p = sys.argv[3]
+d = load(p)
 v=max(-12.0,min(12.0,float(sys.argv[2])))
 d['gains'][int(sys.argv[1])]=v
 # Editing a band *is* the custom curve: remember it, so switching to a named
 # preset and back to Custom restores exactly what was dialled in.
 d['custom']=list(d['gains'])
 d['active']='custom'
-json.dump(d,open(p,'w'))
+save(p, d)
 PY
 }
 
 ensure_state
 case "${1:-status}" in
   get)
-    "$PYTHON" - "$STATE" <<'PY'
-import json,sys
-d=json.load(open(sys.argv[1]))
+    run_py "$STATE" <<'PY'
+d = load(sys.argv[1])
 d.setdefault('custom',[0]*10)
 d['preset']=d.get('active')
 print(json.dumps(d))
 PY
     ;;
   status)
-    "$PYTHON" - "$STATE" "$SYSTEMCTL" <<'PY'
-import json,sys,subprocess
-d=json.load(open(sys.argv[1]))
+    run_py "$STATE" "$SYSTEMCTL" <<'PY'
+import subprocess
+d = load(sys.argv[1])
 bands=[31,62,125,250,500,1000,2000,4000,8000,16000]
 act=subprocess.run([sys.argv[2],'--user','is-active','omarchy-eq.service'],
                    capture_output=True,text=True).stdout.strip()
@@ -321,22 +418,20 @@ PY
     ;;
   set)    set_band "${2:?band}" "${3:?dB}"; apply_live_or_restart || exit 1; echo "band ${2} -> ${3} dB" ;;
   preamp)
-    "$PYTHON" - "${2:?dB}" <<'PY'
-import json,sys,os
-p=os.path.expanduser('~/.config/omarchy/eq.json')
-d=json.load(open(p))
+    run_py "${2:?dB}" "$STATE" <<'PY'
+p = sys.argv[2]
+d = load(p)
 d['preamp']=max(-12.0,min(12.0,float(sys.argv[1])))
-json.dump(d,open(p,'w'))
+save(p, d)
 PY
     apply_live_or_restart || exit 1; echo "preamp -> ${2} dB" ;;
   preset)
     # Unquoted heredoc so $(presets_py) expands; the block has no other $.
-    "$PYTHON" - "${2:?preset}" <<PY
-import json,sys,os
+    run_py "${2:?preset}" "$STATE" <<PY
 $(presets_py)
 n=sys.argv[1]
-p=os.path.expanduser('~/.config/omarchy/eq.json')
-d=json.load(open(p))
+p=sys.argv[2]
+d=load(p)
 if n == 'custom':
     d['gains']=list(d.get('custom',[0]*10))
 elif n in P:
@@ -344,7 +439,7 @@ elif n in P:
 else:
     print("presets: "+", ".join(list(P)+['custom']),file=sys.stderr); sys.exit(1)
 d['active']=n
-json.dump(d,open(p,'w'))
+save(p, d)
 print("preset: "+n)
 PY
     # Only apply if the preset was recognised; otherwise the unknown name would
@@ -352,19 +447,17 @@ PY
     [[ ${PIPESTATUS[0]:-$?} -eq 0 ]] || exit 1
     apply_live_or_restart || exit 1 ;;
   surround)
-    "$PYTHON" - "$STATE" "${2:?on|off}" <<'PY' || exit 1
-import json,sys
+    run_py "$STATE" "${2:?on|off}" <<'PY' || exit 1
 if sys.argv[2] not in ('on','off'):
-    sys.exit("omarchy-eq: surround expects 'on' or 'off'")
-p=sys.argv[1]
-d=json.load(open(p)); d['surround']=(sys.argv[2]=='on'); json.dump(d,open(p,'w'))
+    _fail("surround expects 'on' or 'off'")
+p = sys.argv[1]
+d = load(p); d['surround'] = (sys.argv[2] == 'on'); save(p, d)
 PY
     apply_live_or_restart || exit 1; echo "surround ${2}" ;;
   on|off)
-    "$PYTHON" - "$STATE" "$1" <<'PY' || exit 1
-import json,sys
-p=sys.argv[1]
-d=json.load(open(p)); d['enabled']=(sys.argv[2]=='on'); json.dump(d,open(p,'w'))
+    run_py "$STATE" "$1" <<'PY' || exit 1
+p = sys.argv[1]
+d = load(p); d['enabled'] = (sys.argv[2] == 'on'); save(p, d)
 PY
     generate || exit 1; restart; echo "equalizer $1" ;;
   apply)  apply_live_or_restart || exit 1; echo "applied" ;;

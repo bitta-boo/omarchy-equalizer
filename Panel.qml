@@ -221,6 +221,21 @@ Panel {
     onExited: { surroundDeadline.stop(); root.reload() }
   }
 
+  // Explicit teardown. Quickshell's Process exposes no kill signal or process
+  // group control, so `running = false` is the only mechanism available; what
+  // this adds is that it is applied to every process, and every timer stopped,
+  // at destruction, rather than relying on a process ending on its own or a
+  // timer firing against an item that is already gone.
+  Component.onDestruction: {
+    var procs = [readProc, writeProc, preampProc, toggleProc, presetProc, surroundProc]
+    for (var i = 0; i < procs.length; i++) {
+      if (procs[i].running) procs[i].running = false
+    }
+    var timers = [readDeadline, writeDeadline, preampDeadline, toggleDeadline,
+                  presetDeadline, surroundDeadline, writeTimer, preampTimer]
+    for (var j = 0; j < timers.length; j++) timers[j].stop()
+  }
+
   Component.onCompleted: reload()
   onOpenedChanged: if (opened) reload()
 
