@@ -63,6 +63,9 @@ are available from the CLI.
 - The toggle in the header bypasses the EQ by routing audio around it, not by
   changing or unloading the filter. Playback is not interrupted and your curve
   stays loaded, so switching back on is instant.
+- If the output is switched elsewhere by something other than this toggle, the
+  header reads **NOT IN AUDIO PATH** rather than reporting headroom for a filter
+  nothing is passing through.
 - If the widget is installed but the DSP half is not, the panel says so and
   gives the command to run, rather than showing faders that do nothing.
 

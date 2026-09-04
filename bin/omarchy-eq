@@ -490,7 +490,12 @@ apply_bypass() {
   [[ -n $PACTL ]] || return 0
   local eq down own from to si
   eq=$(sink_id); down=$(downstream_sink); own=$(own_stream)
-  [[ -n $eq && -n $down ]] || return 0
+  # `own` is required, not optional. Without it the exclusion below matches
+  # nothing and the filter's own playback stream gets moved into the filter's
+  # own sink - a feedback loop. It can legitimately be missing for a moment
+  # after a reload, before the playback stream reconnects, so bail out rather
+  # than route blind.
+  [[ -n $eq && -n $down && -n $own ]] || return 0
   if [[ $1 == on ]]; then from=$down; to=$eq; else from=$eq; to=$down; fi
   for si in $("$PACTL" list short sink-inputs 2>/dev/null |
               "$AWK" -v f="$from" -v o="$own" '$2 == f && $1 != o { print $1 }'); do
@@ -562,8 +567,16 @@ PY
 ensure_state
 case "${1:-status}" in
   get)
-    run_py "$STATE" <<'PY'
+    routed=0
+    if [[ -n $PACTL ]] && [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]]; then
+      routed=1
+    fi
+    run_py "$STATE" "$routed" <<'PY'
 d = load(sys.argv[1])
+# Whether audio is actually routed through the filter, which is not the same as
+# whether the user has it switched on: the output can be changed elsewhere, and
+# then the panel would happily report headroom for a filter nothing goes through.
+d['routed'] = sys.argv[2] == '1'
 d['gains'] = gains_of(d)
 d['custom'] = gains_of({'gains': d.get('custom')})
 d['preamp'] = num(d.get('preamp'))
@@ -574,14 +587,21 @@ print(json.dumps(d))
 PY
     ;;
   status)
-    run_py "$STATE" "$SYSTEMCTL" <<'PY'
+    routed=0
+    if [[ -n $PACTL ]] && [[ $("$PACTL" get-default-sink 2>/dev/null) == omarchy_eq ]]; then
+      routed=1
+    fi
+    run_py "$STATE" "$SYSTEMCTL" "$routed" <<'PY'
 import subprocess
 d = load(sys.argv[1])
 gains = gains_of(d)
 bands=[31,62,125,250,500,1000,2000,4000,8000,16000]
 act=subprocess.run([sys.argv[2],'--user','is-active','omarchy-eq.service'],
                    capture_output=True,text=True).stdout.strip()
-print("equalizer: %s (service %s)"%("enabled" if d.get('enabled', True) else "disabled",act))
+state = "enabled" if d.get('enabled', True) else "bypassed"
+print("equalizer: %s (service %s)"%(state, act))
+if d.get('enabled', True) and sys.argv[3] != '1':
+    print("           note: audio is not routed through the equalizer right now")
 print("surround : %s"%("on" if d.get('surround') else "off"))
 print("preamp   : %+.1f dB"%num(d.get('preamp')))
 for b,g in zip(bands,gains):

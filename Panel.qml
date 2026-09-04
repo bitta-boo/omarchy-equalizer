@@ -39,6 +39,10 @@ Panel {
   }
   property bool loaded: false
   property bool backendMissing: false
+  // Whether audio actually goes through the filter. Distinct from `enabled`:
+  // the output can be switched elsewhere, and reporting headroom for a filter
+  // nothing passes through is exactly the kind of lie that wastes an evening.
+  property bool routed: true
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   readonly property real faderLength: Style.space(140)
 
@@ -126,7 +130,8 @@ Panel {
     }
     var pre = (typeof d.preamp === "number" && isFinite(d.preamp)) ? Math.max(-12, Math.min(12, d.preamp)) : 0
     var preset = (typeof d.preset === "string" && d.preset.length <= 32) ? d.preset : ""
-    return { gains: g, preamp: pre, surround: !!d.surround, enabled: !!d.enabled, preset: preset }
+    return { gains: g, preamp: pre, surround: !!d.surround, enabled: !!d.enabled,
+             preset: preset, routed: d.routed !== false }
   }
 
   Process {
@@ -149,6 +154,7 @@ Panel {
         root.surround = d.surround
         root.activePreset = d.preset
         root.enabled = d.enabled
+        root.routed = d.routed
         root.loaded = true
       }
     }
@@ -347,10 +353,12 @@ Panel {
         fontFamily: root.fontFamily
         meta: root.backendMissing
               ? "NOT INSTALLED"
-              : root.enabled
-                ? ((root.autoHeadroom >= 0 ? "+" : "") + root.autoHeadroom.toFixed(1) + " DB HEADROOM")
-                : "BYPASSED"
-        iconOpacity: (root.enabled && !root.backendMissing) ? 1.0 : 0.5
+              : !root.enabled
+                ? "BYPASSED"
+                : !root.routed
+                  ? "NOT IN AUDIO PATH"
+                  : ((root.autoHeadroom >= 0 ? "+" : "") + root.autoHeadroom.toFixed(1) + " DB HEADROOM")
+        iconOpacity: (root.enabled && root.routed && !root.backendMissing) ? 1.0 : 0.5
         iconComponent: Component {
           Text {
             text: ""                       // nf-fa-sliders
