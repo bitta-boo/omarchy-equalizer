@@ -65,7 +65,7 @@ usage: omarchy-eq <command>
   preamp <dB>            manual level offset on top of the automatic headroom
   preset <name>          flat | treble | bass-up | vocal | loudness | gaming | custom
                          custom recalls whatever you last dialled in by hand
-  on | off               enable/disable the equalizer sink
+  on | off               bypass the equalizer (audio keeps playing, flat)
   surround on|off        stereo widening (mid/side)
   apply                  regenerate the graph and restart the service
 
@@ -147,6 +147,17 @@ def num(value, default=0.0, lo=-12.0, hi=12.0):
     if v != v or v in (float("inf"), float("-inf")):
         return default
     return max(lo, min(hi, v))
+
+def effective(d, width_on):
+    """What is actually programmed into the filter.
+
+    Bypass is a flat graph, not a stopped service. Stopping destroys the sink,
+    and whatever is playing through it stops with it - toggling the equalizer
+    off should leave the music playing, just unprocessed.
+    """
+    if not d.get("enabled", True):
+        return [0.0] * 10, 0.0, 1.0
+    return gains_of(d), num(d.get("preamp")), (width_on if d.get("surround") else 1.0)
 
 def gains_of(d):
     """Exactly ten sane gains, whatever the file actually contains."""
@@ -274,10 +285,10 @@ g = d.get('gains')
 if not isinstance(g, list) or len(g) != 10:
     sys.exit("omarchy-eq: 'gains' must be a list of 10 numbers in %s" % path)
 try:
-    gains = [float(x) for x in g]
-    preamp = float(d.get('preamp', 0))
+    [float(x) for x in g]
 except (TypeError, ValueError) as e:
     sys.exit("omarchy-eq: non-numeric value in %s: %s" % (path, e))
+gains, preamp, width = effective(d, width_on)
 # Auto headroom: pull the chain down by the largest boost so a peak cannot clip.
 # `preamp` in the state file is an extra manual offset on top of that.
 #
@@ -289,7 +300,7 @@ except (TypeError, ValueError) as e:
 head = round(-max([0.0] + gains) + preamp, 2)
 print(' '.join('%g' % x for x in gains))
 print(round(10 ** (head / 20.0), 6))
-print(width_on if d.get('surround') else 1.0)
+print(width)
 PY
 ) || return 1
   { read -r gains; read -r mult; read -r width; } <<<"$vals"
@@ -385,11 +396,9 @@ live_apply() {
   local params; params=$(run_py "$STATE" "$WIDTH_ON" <<'PY'
 import math
 d = load(sys.argv[1])
-WIDTH_ON = float(sys.argv[2])
-gains=[float(g) for g in d['gains']]
+gains, preamp, width = effective(d, float(sys.argv[2]))
 # Same auto-headroom rule as generate(), so live and regenerated agree.
-pre=-max([0.0]+gains)
-pre=round(pre + float(d.get('preamp',0)), 2)
+pre=round(-max([0.0]+gains) + preamp, 2)
 mult=round(10 ** (pre / 20.0), 6)
 out=[]
 for i,g in enumerate(gains):
@@ -397,9 +406,8 @@ for i,g in enumerate(gains):
         out.append('\"eq%d_%s:Gain\" %s' % (i, ch, g))
 for ch in ('l','r'):
     out.append('\"pre_%s:Mult\" %s' % (ch, mult))
-w = WIDTH_ON if d.get('surround') else 1.0
-out.append('\"outl:Gain 2\" %s' % w)
-out.append('"outr:Gain 2" %s' % w)
+out.append('\"outl:Gain 2\" %s' % width)
+out.append('"outr:Gain 2" %s' % width)
 print(' '.join(out))
 PY
 ) || return 1
@@ -433,19 +441,18 @@ def same(name, want, tol=0.01):
 # only the band gains meant a preamp-only or surround-only change verified
 # successfully while the bands happened to be unchanged, so the restart was
 # skipped and that change never reached the filter at all.
-gains = gains_of(d)
+gains, preamp, width = effective(d, width_on)
 for i, w in enumerate(gains):
     for ch in ('l', 'r'):
         if not same('eq%d_%s:Gain' % (i, ch), w):
             raise SystemExit(1)
 
-head = round(-max([0.0] + gains) + num(d.get('preamp')), 2)
+head = round(-max([0.0] + gains) + preamp, 2)
 mult = round(10 ** (head / 20.0), 6)
 for ch in ('l', 'r'):
     if not same('pre_%s:Mult' % ch, mult, 0.0005):
         raise SystemExit(1)
 
-width = width_on if d.get('surround') else 1.0
 for side in ('outl', 'outr'):
     if not same('%s:Gain 2' % side, width, 0.0005):
         raise SystemExit(1)
@@ -470,28 +477,11 @@ restart() {
   fi
 
   "$SYSTEMCTL" --user daemon-reload 2>/dev/null
-  # Anything that is not an explicit false keeps the service running: an empty
-  # result means the state could not be read at all, which is not consent to
-  # stop the equalizer.
-  local want; want=$(json_get enabled)
-  if [[ $want != False && $want != false ]]; then
-    "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
-    "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
-  else
-    # Remember that the sink was the default before it goes away, so switching
-    # back on can put it there again. Starting from stopped there is no sink to
-    # inspect, so without this the restore depends on WirePlumber happening to
-    # remember the preference - which it need not.
-    [[ -n $was_default ]] && run_py "$STATE" <<'PY'
-p = sys.argv[1]
-lock(p)
-d = load(p)
-d['was_default'] = True
-save(p, d)
-PY
-    "$SYSTEMCTL" --user stop "$UNIT" 2>/dev/null
-    return
-  fi
+  # The service always runs. Bypass is a flat graph, not a stopped service:
+  # stopping destroys the sink and anything playing through it stops too, which
+  # is not what toggling an equalizer off should do.
+  "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
+  "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
 
   [[ -n $PACTL ]] || return
   local i
@@ -501,18 +491,6 @@ PY
     sleep 0.2
   done
   [[ -n $eqsink ]] || return
-  # Either it was the default a moment ago, or it was the default when it was
-  # last switched off and this is the switch back on.
-  if [[ -z $was_default ]] && [[ $(json_get was_default) == True ]]; then
-    was_default=1
-    run_py "$STATE" <<'PY'
-p = sys.argv[1]
-lock(p)
-d = load(p)
-d.pop('was_default', None)
-save(p, d)
-PY
-  fi
   [[ -n $was_default ]] && "$PACTL" set-default-sink omarchy_eq 2>/dev/null
   local si
   for si in $streams; do
