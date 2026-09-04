@@ -1,15 +1,15 @@
 # Omarchy Equalizer
 
 A 10-band graphic equalizer for [Omarchy](https://omarchy.org/): a PipeWire
-filter-chain plus a bar widget of sliders.
+filter-chain plus a bar widget of vertical faders.
 
-![bar widget with the panel open](preview.png)
+![the equalizer panel](preview.png)
 
 - **No GUI application.** The DSP is a PipeWire filter-chain; the only interface
   is the Omarchy bar widget and a CLI. Nothing to theme, nothing extra running.
 - **No external plugins.** Uses PipeWire's *builtin* `bq_peaking` biquads and a
   `linear` gain stage — no LV2, no LSP/Calf, nothing outside the base system.
-- **Changes apply live.** Moving a slider updates the running filter in place;
+- **Changes apply live.** Moving a fader updates the running filter in place;
   playback is never interrupted.
 - **Automatic headroom.** The preamp is set to `-max(boost)` so a boosted curve
   cannot clip, with a manual offset available on top.
@@ -59,6 +59,8 @@ are available from the CLI.
   into that slot, so you can switch to a preset and back and your own curve is
   still there. It persists across reboots.
 - The toggle in the header bypasses the EQ without unloading it.
+- If the widget is installed but the DSP half is not, the panel says so and
+  gives the command to run, rather than showing faders that do nothing.
 
 Everything is also available from the CLI:
 
@@ -69,6 +71,7 @@ omarchy-eq preamp 0            # manual offset; 0 = fully automatic
 omarchy-eq preset custom       # flat | treble | bass-up | vocal | loudness | gaming | custom
 omarchy-eq surround on | off   # stereo widening
 omarchy-eq on | off
+omarchy-eq apply               # regenerate the graph from the saved state
 ```
 
 ### Presets
@@ -98,7 +101,7 @@ the channels, so centred content passes at exactly unity and typical stereo
 gains under 1 dB; only fully anti-phase material approaches the width factor,
 which real recordings do not do at full scale. Reserving that worst case cost
 4.1 dB on everything and was audible as a volume drop the moment you enabled it.
-If very wide material ever clips, `pre` is the remedy.
+If very wide material ever clips, the preamp is the remedy.
 
 The filter is hosted as its **own PipeWire client** under its own config name,
 mirroring how Omarchy hosts its speaker tuning. That matters:
@@ -124,6 +127,8 @@ leave the audio graph in a bad state.
 ```
 manifest.json               plugin manifest (must be at the repo root)
 Panel.qml                   the Omarchy bar widget
+preview.png                 panel screenshot used by this README
+install.sh / uninstall.sh   installers for the DSP half
 bin/omarchy-eq              CLI, graph generator, live updates
 pipewire/omarchy-eq.conf    filter-chain host config
 systemd/omarchy-eq.service  user service

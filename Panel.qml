@@ -1,4 +1,5 @@
 import QtQuick
+import QtQuick.Controls
 import Quickshell
 import Quickshell.Io
 import qs.Commons
@@ -303,11 +304,25 @@ Panel {
       onCloseRequested: root.close()
     }
 
+    // KeyboardPanel caps the card height and does not scroll on its own, so
+    // content taller than the cap would simply be cut off - the presets would
+    // become unreachable at a larger text size. Same guard the Display panel
+    // uses: scroll inside a clipped view, with the bar shown only when needed.
+    ScrollView {
+      id: scrollArea
+      anchors.fill: parent
+      clip: true
+      ScrollBar.horizontal.policy: ScrollBar.AlwaysOff
+      ScrollBar.vertical.policy: column.implicitHeight > height ? ScrollBar.AsNeeded : ScrollBar.AlwaysOff
+      Binding {
+        target: scrollArea.contentItem
+        property: "interactive"
+        value: column.implicitHeight > scrollArea.height
+      }
+
     Column {
       id: column
-      anchors.left: parent.left
-      anchors.right: parent.right
-      anchors.top: parent.top
+      width: scrollArea.availableWidth
       // Style.space(14) between sections and Style.space(6) inside them is the
       // rhythm the Display panel uses; the shared components below carry the
       // rest of the house styling.
@@ -608,6 +623,7 @@ Panel {
           }
         }
       }
+    }
     }
   }
 }
