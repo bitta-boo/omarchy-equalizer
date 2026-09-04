@@ -125,19 +125,22 @@ mirroring how Omarchy hosts its speaker tuning. That matters:
 - it does not share PipeWire's stock `filter-chain.conf.d` namespace, so it
   cannot pick up unrelated user filters
 
-Applying a change reloads the filter. `pw-cli set-param` is attempted first,
-but a PipeWire filter-chain does not accept control changes that way: the call
-reports success and nothing moves. So the result is read back and compared
-against all twenty band controls, and the service is restarted when they do not
-match. Trusting the exit status instead meant edits were saved to disk, reported
-as applied, and never reached the audio until something else restarted the
-service. The reload drops the sink briefly, which is why the panel writes on
-release rather than on every drag tick.
+Changes are pushed into the running filter with `pw-cli set-param`, which the
+filter accepts while it is processing audio. Nothing is interrupted and the sink
+is not disturbed.
 
-Reloading destroys the sink, and WirePlumber responds by moving every stream to
-another output and switching the default away — which silently takes the
-equalizer out of the audio path. So the streams pointed at the sink, and whether
-it was the default, are recorded before the reload and restored after it.
+That only works for control values. A change to the nodes or links of the graph
+cannot be expressed as a parameter write, so the generated config is compared
+with the copy the filter actually loaded — with every number blanked out, so the
+comparison sees structure and not values — and the filter is reloaded only when
+the shape has really changed.
+
+`set-param` reports success whether or not the filter took the values, and it
+silently discards them when the sink is suspended. So the result is read back
+and compared against all twenty-four controls, and a reload is the fallback when
+they do not match. A reload destroys the sink, and a stream whose sink is
+destroyed under it stops rather than pauses, so streams are moved to the device
+the filter feeds before the reload and moved back afterwards.
 
 The preamp sits at the **head** of the chain, because attenuating before the
 biquads is what prevents clipping; a boosted band clips inside the filter
