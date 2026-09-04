@@ -414,15 +414,41 @@ PY
   # Every band is compared, not just one: checking a single control passes by
   # coincidence whenever that particular band happens to be unchanged.
   local live; live=$("$PW_CLI" enum-params "$id" Props 2>/dev/null) || return 1
-  run_py "$STATE" "$live" <<'PY' || return 1
-import re
-want = gains_of(load(sys.argv[1]))
+  run_py "$STATE" "$live" "$WIDTH_ON" <<'PY' || return 1
+import math, re
+
+d = load(sys.argv[1])
 text = sys.argv[2]
-for i, w in enumerate(want):
+width_on = float(sys.argv[3])
+
+def live(name):
+    m = re.search(r'String "%s"\s*\n\s*Float ([-\d.]+)' % re.escape(name), text)
+    return None if m is None else float(m.group(1))
+
+def same(name, want, tol=0.01):
+    got = live(name)
+    return got is not None and abs(got - want) <= tol
+
+# Every control the write sets has to be checked, not just the bands. Comparing
+# only the band gains meant a preamp-only or surround-only change verified
+# successfully while the bands happened to be unchanged, so the restart was
+# skipped and that change never reached the filter at all.
+gains = gains_of(d)
+for i, w in enumerate(gains):
     for ch in ('l', 'r'):
-        m = re.search(r'String "eq%d_%s:Gain"\s*\n\s*Float ([-\d.]+)' % (i, ch), text)
-        if m is None or abs(float(m.group(1)) - w) > 0.01:
+        if not same('eq%d_%s:Gain' % (i, ch), w):
             raise SystemExit(1)
+
+head = round(-max([0.0] + gains) + num(d.get('preamp')), 2)
+mult = round(10 ** (head / 20.0), 6)
+for ch in ('l', 'r'):
+    if not same('pre_%s:Mult' % ch, mult, 0.0005):
+        raise SystemExit(1)
+
+width = width_on if d.get('surround') else 1.0
+for side in ('outl', 'outr'):
+    if not same('%s:Gain 2' % side, width, 0.0005):
+        raise SystemExit(1)
 PY
 }
 
