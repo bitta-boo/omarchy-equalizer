@@ -608,7 +608,10 @@ PY
   own=$(own_stream)
   local si
   for si in $(cat "$PARKED" 2>/dev/null; printf '%s\n' $streams); do
-    [[ -z $si || $si == "$own" ]] && continue
+    # Stream ids only. The parked list is a file in the user's config directory,
+    # and nothing else validates it before it is handed to pactl.
+    [[ $si =~ ^[0-9]+$ ]] || continue
+    [[ $si == "$own" ]] && continue
     "$PACTL" move-sink-input "$si" "$eqsink" 2>/dev/null
   done
   rm -f "$PARKED" 2>/dev/null
