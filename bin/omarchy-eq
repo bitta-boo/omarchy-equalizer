@@ -554,6 +554,20 @@ restart() {
       "$AWK" -v s="$eqsink" '$2==s{print $1}')
   fi
 
+  # Get playback off the sink before it disappears. A stream whose sink is
+  # destroyed under it does not merely pause - Rhythmbox stops outright. Moving
+  # it to the device the filter feeds keeps it playing, briefly unprocessed,
+  # and it is moved back once the new graph is up.
+  local down; down=$(downstream_sink)
+  local own; own=$(own_stream)
+  if [[ -n $PACTL && -n $down && -n $own && -n $streams ]]; then
+    local si
+    for si in $streams; do
+      [[ $si == "$own" ]] && continue
+      "$PACTL" move-sink-input "$si" "$down" 2>/dev/null
+    done
+  fi
+
   "$SYSTEMCTL" --user daemon-reload 2>/dev/null
   # The service always runs. Bypass is a flat graph, not a stopped service:
   # stopping destroys the sink and anything playing through it stops too, which
@@ -573,6 +587,7 @@ restart() {
   [[ -n $was_default ]] && "$PACTL" set-default-sink omarchy_eq 2>/dev/null
   local si
   for si in $streams; do
+    [[ $si == "$own" ]] && continue
     "$PACTL" move-sink-input "$si" "$eqsink" 2>/dev/null
   done
   return 0
