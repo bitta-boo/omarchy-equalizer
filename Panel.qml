@@ -160,6 +160,17 @@ Panel {
   property int pendingBand: -1
   property real pendingValue: 0
 
+  // Dragging only moves the model; the write happens on release. Applying a
+  // change now costs a filter restart (PipeWire does not accept filter-chain
+  // control changes at runtime), so writing on every drag tick would restart
+  // the sink repeatedly across a single gesture.
+  function preview(index, value) {
+    var next = gains.slice()
+    next[index] = Math.round(value * 2) / 2
+    gains = next
+    activePreset = "custom"
+  }
+
   function commit(index, value) {
     // Update the model immediately, not just on the next read. The slider's
     // `value` is bound to gains[index]; PanelSlider snaps liveValue back to
@@ -194,6 +205,7 @@ Panel {
   }
 
   property real pendingPreamp: 0
+  function previewPreamp(v) { preamp = Math.round(v * 2) / 2 }
   function commitPreamp(v) {
     preamp = Math.round(v * 2) / 2
     pendingPreamp = preamp
@@ -446,7 +458,7 @@ Panel {
                     fillColor: fader.trackColor
                     value: root.loaded ? root.gains[index] : 0
                     opacity: root.enabled ? 1 : 0.45
-                    onMoved: function(v) { root.commit(index, v) }
+                    onMoved: function(v) { root.preview(index, v) }
                     onReleased: function(v) { root.commit(index, v) }
                     onRightClicked: root.commit(index, 0)
                   }
@@ -509,7 +521,7 @@ Panel {
             tickCount: 5
             value: root.loaded ? root.preamp : 0
             opacity: root.enabled ? 1 : 0.45
-            onMoved: function(v) { root.commitPreamp(v) }
+            onMoved: function(v) { root.previewPreamp(v) }
             onReleased: function(v) { root.commitPreamp(v) }
             // Right-click resets to 0 = fully automatic headroom; landing on the
             // centre by dragging is fiddly.

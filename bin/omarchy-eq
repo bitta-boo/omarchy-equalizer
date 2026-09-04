@@ -395,7 +395,27 @@ out.append('"outr:Gain 2" %s' % w)
 print(' '.join(out))
 PY
 ) || return 1
-  "$PW_CLI" set-param "$id" Props "{ params = [ $params ] }" >/dev/null 2>&1
+  "$PW_CLI" set-param "$id" Props "{ params = [ $params ] }" >/dev/null 2>&1 || return 1
+
+  # pw-cli exits 0 whether or not the filter actually accepted the values, so
+  # the write has to be confirmed. On PipeWire 1.6 a filter-chain does not take
+  # control changes this way at all - the call succeeds and nothing moves - and
+  # trusting the exit status meant every edit was written to disk, reported as
+  # applied, and never reached the audio until something restarted the service.
+  #
+  # Every band is compared, not just one: checking a single control passes by
+  # coincidence whenever that particular band happens to be unchanged.
+  local live; live=$("$PW_CLI" enum-params "$id" Props 2>/dev/null) || return 1
+  run_py "$STATE" "$live" <<'PY' || return 1
+import re
+want = gains_of(load(sys.argv[1]))
+text = sys.argv[2]
+for i, w in enumerate(want):
+    for ch in ('l', 'r'):
+        m = re.search(r'String "eq%d_%s:Gain"\s*\n\s*Float ([-\d.]+)' % (i, ch), text)
+        if m is None or abs(float(m.group(1)) - w) > 0.01:
+            raise SystemExit(1)
+PY
 }
 
 # Only used when the graph must actually be rebuilt (enable/disable), or when

@@ -9,8 +9,10 @@ filter-chain plus a bar widget of vertical faders.
   is the Omarchy bar widget and a CLI. Nothing to theme, nothing extra running.
 - **No external plugins.** Uses PipeWire's *builtin* `bq_peaking` biquads and a
   `linear` gain stage — no LV2, no LSP/Calf, nothing outside the base system.
-- **Changes apply live.** Moving a fader updates the running filter in place;
-  playback is never interrupted.
+- **Applied on release.** Dragging a fader previews the curve; letting go
+  applies it. PipeWire does not accept filter-chain control changes at runtime,
+  so applying reloads the filter — briefly, and once per gesture rather than
+  continuously while you drag.
 - **Automatic headroom.** The preamp is set to `-max(boost)` so a boosted curve
   cannot clip, with a manual offset available on top.
 - **Surround toggle.** Mid/side stereo widening that flips live and leaves the
@@ -111,8 +113,14 @@ mirroring how Omarchy hosts its speaker tuning. That matters:
 - it does not share PipeWire's stock `filter-chain.conf.d` namespace, so it
   cannot pick up unrelated user filters
 
-Gain changes are pushed into the running graph with `pw-cli set-param`, never by
-restarting — restarting drops the sink, which makes players lose their stream.
+Applying a change reloads the filter. `pw-cli set-param` is attempted first,
+but a PipeWire filter-chain does not accept control changes that way: the call
+reports success and nothing moves. So the result is read back and compared
+against all twenty band controls, and the service is restarted when they do not
+match. Trusting the exit status instead meant edits were saved to disk, reported
+as applied, and never reached the audio until something else restarted the
+service. The reload drops the sink briefly, which is why the panel writes on
+release rather than on every drag tick.
 
 The preamp sits at the **head** of the chain, because attenuating before the
 biquads is what prevents clipping; a boosted band clips inside the filter
