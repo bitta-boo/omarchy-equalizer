@@ -478,6 +478,17 @@ restart() {
     "$SYSTEMCTL" --user reset-failed "$UNIT" 2>/dev/null
     "$SYSTEMCTL" --user restart "$UNIT" 2>/dev/null
   else
+    # Remember that the sink was the default before it goes away, so switching
+    # back on can put it there again. Starting from stopped there is no sink to
+    # inspect, so without this the restore depends on WirePlumber happening to
+    # remember the preference - which it need not.
+    [[ -n $was_default ]] && run_py "$STATE" <<'PY'
+p = sys.argv[1]
+lock(p)
+d = load(p)
+d['was_default'] = True
+save(p, d)
+PY
     "$SYSTEMCTL" --user stop "$UNIT" 2>/dev/null
     return
   fi
@@ -490,6 +501,18 @@ restart() {
     sleep 0.2
   done
   [[ -n $eqsink ]] || return
+  # Either it was the default a moment ago, or it was the default when it was
+  # last switched off and this is the switch back on.
+  if [[ -z $was_default ]] && [[ $(json_get was_default) == True ]]; then
+    was_default=1
+    run_py "$STATE" <<'PY'
+p = sys.argv[1]
+lock(p)
+d = load(p)
+d.pop('was_default', None)
+save(p, d)
+PY
+  fi
   [[ -n $was_default ]] && "$PACTL" set-default-sink omarchy_eq 2>/dev/null
   local si
   for si in $streams; do
